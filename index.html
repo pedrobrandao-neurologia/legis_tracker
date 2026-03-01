@@ -1,0 +1,1684 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LegisTracker</title>
+  
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    /* Estilos básicos para resetar a margem e garantir que a tela ocupe tudo */
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ─── Extraindo os Hooks do objeto global do React ──────────────
+    const { useState, useEffect, useCallback, useRef, createContext, useContext, useMemo } = React;
+
+    // ─── Context ───────────────────────────────────────────────────────────
+    const AppContext = createContext();
+
+    const STORAGE_KEYS = {
+      PROJECTS: "legis_projects",
+      NOTIFICATIONS: "legis_notifications",
+      SETTINGS: "legis_settings",
+      THEME: "legis_theme",
+      LAST_TRAMITACOES: "legis_last_tram",
+    };
+
+    function loadStorage(key, fallback) {
+      try {
+        const v = localStorage.getItem(key);
+        return v ? JSON.parse(v) : fallback;
+      } catch {
+        return fallback;
+      }
+    }
+    function saveStorage(key, val) {
+      localStorage.setItem(key, JSON.stringify(val));
+    }
+
+    // ─── API Service ───────────────────────────────────────────────────────
+    const BASE = "https://dadosabertos.camara.leg.br/api/v2";
+
+    async function apiFetch(path, params = {}) {
+      const url = new URL(`${BASE}${path}`);
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
+      });
+      const res = await fetch(url.toString(), {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      return res.json();
+    }
+
+    async function searchProposicoes(sigla, numero, ano) {
+      const data = await apiFetch("/proposicoes", {
+        siglaTipo: sigla,
+        numero,
+        ano,
+        ordem: "DESC",
+        ordenarPor: "id",
+        itens: 15,
+      });
+      return data.dados || [];
+    }
+
+    async function searchDeputados(nome) {
+      const data = await apiFetch("/deputados", {
+        nome,
+        ordem: "ASC",
+        ordenarPor: "nome",
+        itens: 20,
+      });
+      return data.dados || [];
+    }
+
+    async function getProposicoesByDeputado(deputadoId, role = "autor", pagina = 1) {
+      const params = {
+        ordem: "DESC",
+        ordenarPor: "id",
+        itens: 20,
+        pagina,
+      };
+      if (role === "autor") params.idDeputadoAutor = deputadoId;
+      if (role === "relator") {
+        params.idDeputadoAutor = deputadoId;
+      }
+      const data = await apiFetch("/proposicoes", params);
+      return { dados: data.dados || [], links: data.links || [] };
+    }
+
+    async function getDeputado(id) {
+      const data = await apiFetch(`/deputados/${id}`);
+      return data.dados;
+    }
+
+    async function getProposicao(id) {
+      const data = await apiFetch(`/proposicoes/${id}`);
+      return data.dados;
+    }
+
+    async function getTramitacoes(id) {
+      const data = await apiFetch(`/proposicoes/${id}/tramitacoes`, {
+        ordem: "DESC",
+        ordenarPor: "dataHora",
+      });
+      return data.dados || [];
+    }
+
+    async function getAutores(id) {
+      const data = await apiFetch(`/proposicoes/${id}/autores`);
+      return data.dados || [];
+    }
+
+    // ─── Regime / Apreciação Utils ─────────────────────────────────────────
+    function regimeBadge(regime) {
+      if (!regime) return { label: "—", color: "#6b7280", bg: "#f3f4f6" };
+      const r = regime.toLowerCase();
+      if (r.includes("urgência") || r.includes("urgencia"))
+        return { label: regime, color: "#fff", bg: "#dc2626" };
+      if (r.includes("prioridade"))
+        return { label: regime, color: "#fff", bg: "#ea580c" };
+      if (r.includes("ordinário") || r.includes("ordinario"))
+        return { label: regime, color: "#fff", bg: "#166534" };
+      return { label: regime, color: "#374151", bg: "#e5e7eb" };
+    }
+
+    function apreciacaoBadge(aprec) {
+      if (!aprec) return { label: "—", color: "#6b7280", bg: "#f3f4f6" };
+      const a = aprec.toLowerCase();
+      if (a === "plenário" || a === "plenario")
+        return { label: aprec, color: "#fff", bg: "#2563eb" };
+      if (a.includes("conclusivo"))
+        return { label: aprec, color: "#fff", bg: "#ea580c" };
+      if (a === "comissão" || a === "comissao")
+        return { label: aprec, color: "#92400e", bg: "#fde68a" };
+      return { label: aprec, color: "#374151", bg: "#e5e7eb" };
+    }
+
+    function isUrgente(regime) {
+      if (!regime) return false;
+      return regime.toLowerCase().includes("urgência") || regime.toLowerCase().includes("urgencia");
+    }
+
+    // ─── Icons (inline SVGs) ───────────────────────────────────────────────
+    const Icons = {
+      Search: () => <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>,
+      Bell: () => <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>,
+      Sun: () => <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>,
+      Moon: () => <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>,
+      Plus: () => <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>,
+      Trash: () => <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>,
+      Back: () => <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>,
+      External: () => <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3"/></svg>,
+      Alert: () => <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2L1 21h22L12 2zm0 4l7.53 13H4.47L12 6zm-1 5v4h2v-4h-2zm0 6v2h2v-2h-2z"/></svg>,
+      Download: () => <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>,
+      Filter: () => <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>,
+      Menu: () => <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 12h18M3 6h18M3 18h18"/></svg>,
+      X: () => <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>,
+      Check: () => <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>,
+      Clock: () => <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>,
+      File: () => <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>,
+      Refresh: () => <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>,
+      Settings: () => <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>,
+    };
+
+    // ─── Badge Component ───────────────────────────────────────────────────
+    function Badge({ label, color, bg, small }) {
+      return (
+        <span
+          style={{
+            display: "inline-block",
+            padding: small ? "1px 7px" : "2px 10px",
+            borderRadius: "4px",
+            fontSize: small ? "10px" : "11px",
+            fontWeight: 700,
+            letterSpacing: "0.02em",
+            color,
+            backgroundColor: bg,
+            whiteSpace: "nowrap",
+            lineHeight: "1.6",
+            textTransform: "uppercase",
+          }}
+        >
+          {label}
+        </span>
+      );
+    }
+
+    // ─── Toast System ──────────────────────────────────────────────────────
+    function ToastContainer({ toasts, dismiss }) {
+      return (
+        <div style={{ position: "fixed", top: 16, right: 16, zIndex: 9999, display: "flex", flexDirection: "column", gap: 8 }}>
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              onClick={() => dismiss(t.id)}
+              style={{
+                padding: "12px 20px",
+                borderRadius: 8,
+                background: t.type === "error" ? "#dc2626" : t.type === "warning" ? "#ea580c" : "#007A37",
+                color: "#fff",
+                fontSize: 13,
+                fontWeight: 600,
+                boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+                cursor: "pointer",
+                maxWidth: 340,
+                animation: "slideIn 0.3s ease",
+              }}
+            >
+              {t.message}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ─── Skeleton Loader ───────────────────────────────────────────────────
+    function Skeleton({ width, height, style }) {
+      const { dark } = useContext(AppContext);
+      return (
+        <div
+          style={{
+            width: width || "100%",
+            height: height || 16,
+            borderRadius: 6,
+            background: dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)",
+            animation: "pulse 1.5s infinite",
+            ...style,
+          }}
+        />
+      );
+    }
+
+    function CardSkeleton() {
+      return (
+        <div style={{ padding: 20, borderRadius: 12, border: "1px solid rgba(128,128,128,0.15)", display: "flex", flexDirection: "column", gap: 10 }}>
+          <Skeleton width="40%" height={20} />
+          <Skeleton width="80%" height={14} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <Skeleton width={90} height={22} />
+            <Skeleton width={70} height={22} />
+          </div>
+          <Skeleton width="60%" height={12} />
+        </div>
+      );
+    }
+
+    // ─── Summary Panel ─────────────────────────────────────────────────────
+    function SummaryPanel({ projects }) {
+      const { dark } = useContext(AppContext);
+      const urgentes = projects.filter((p) => isUrgente(p.statusProposicao?.regime)).length;
+      const plenario = projects.filter((p) => {
+        const a = (p.statusProposicao?.apreciacao || "").toLowerCase();
+        return a === "plenário" || a === "plenario";
+      }).length;
+      const comissao = projects.filter((p) => {
+        const a = (p.statusProposicao?.apreciacao || "").toLowerCase();
+        return a.includes("comiss");
+      }).length;
+
+      const cards = [
+        { label: "Em Urgência", value: urgentes, color: "#dc2626", icon: "🔴" },
+        { label: "Plenário", value: plenario, color: "#2563eb", icon: "🏛" },
+        { label: "Comissão", value: comissao, color: "#ea580c", icon: "📋" },
+        { label: "Total Monitorados", value: projects.length, color: "#007A37", icon: "📊" },
+      ];
+
+      return (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 24 }}>
+          {cards.map((c) => (
+            <div
+              key={c.label}
+              style={{
+                padding: "16px 18px",
+                borderRadius: 10,
+                background: dark ? "rgba(255,255,255,0.04)" : "#fff",
+                border: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+                borderLeft: `4px solid ${c.color}`,
+              }}
+            >
+              <div style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                {c.icon} {c.label}
+              </div>
+              <div style={{ fontSize: 28, fontWeight: 800, color: c.color, marginTop: 4, fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                {c.value}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ─── Project Card ──────────────────────────────────────────────────────
+    function ProjetoCard({ project, onSelect, onRemove }) {
+      const { dark } = useContext(AppContext);
+      const status = project.statusProposicao || {};
+      const regime = regimeBadge(status.regime);
+      const aprec = apreciacaoBadge(status.apreciacao);
+      const urgente = isUrgente(status.regime);
+
+      return (
+        <div
+          onClick={() => onSelect(project)}
+          style={{
+            padding: "18px 20px",
+            borderRadius: 12,
+            background: dark ? "rgba(255,255,255,0.04)" : "#fff",
+            border: urgente
+              ? "2px solid #dc2626"
+              : `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"}`,
+            cursor: "pointer",
+            transition: "all 0.2s",
+            position: "relative",
+            boxShadow: urgente ? "0 0 12px rgba(220,38,38,0.15)" : "0 1px 3px rgba(0,0,0,0.04)",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 6px 20px rgba(0,0,0,0.1)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = urgente ? "0 0 12px rgba(220,38,38,0.15)" : "0 1px 3px rgba(0,0,0,0.04)"; }}
+        >
+          {urgente && (
+            <div style={{ position: "absolute", top: 8, right: 10, color: "#dc2626", animation: "pulse 2s infinite" }}>
+              <Icons.Alert />
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+            <div style={{ fontWeight: 800, fontSize: 16, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+              {project.siglaTipo} {project.numero}/{project.ano}
+            </div>
+            <button
+              onClick={(e) => { e.stopPropagation(); onRemove(project.id); }}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                color: dark ? "#6b7280" : "#9ca3af",
+                padding: 4,
+                borderRadius: 4,
+                display: "flex",
+              }}
+              title="Remover monitoramento"
+            >
+              <Icons.Trash />
+            </button>
+          </div>
+
+          <p style={{ fontSize: 13, color: dark ? "#9ca3af" : "#6b7280", margin: "0 0 12px", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+            {project.ementa}
+          </p>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+            <Badge {...aprec} />
+            <Badge {...regime} />
+          </div>
+
+          {status.descricaoSituacao && (
+            <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", display: "flex", alignItems: "center", gap: 4 }}>
+              <Icons.Clock />
+              <span>{status.descricaoSituacao}</span>
+              {status.siglaOrgao && <span style={{ fontWeight: 700 }}> — {status.siglaOrgao}</span>}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ─── Search Modal ──────────────────────────────────────────────────────
+    function SearchModal({ onClose, onAdd, monitoredIds, addToast }) {
+      const { dark } = useContext(AppContext);
+      const [mode, setMode] = useState("proposicao");
+      const [query, setQuery] = useState("");
+      const [results, setResults] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [detailsCache, setDetailsCache] = useState({});
+      const inputRef = useRef();
+
+      const [deputados, setDeputados] = useState([]);
+      const [selectedDeputado, setSelectedDeputado] = useState(null);
+      const [deputadoRole, setDeputadoRole] = useState("autor");
+      const [depLoading, setDepLoading] = useState(false);
+      const [depProjLoading, setDepProjLoading] = useState(false);
+      const [depPage, setDepPage] = useState(1);
+      const [hasMore, setHasMore] = useState(false);
+
+      useEffect(() => { inputRef.current?.focus(); }, [mode]);
+
+      useEffect(() => {
+        setQuery("");
+        setResults([]);
+        setDeputados([]);
+        setSelectedDeputado(null);
+        setDetailsCache({});
+        setDepPage(1);
+        setHasMore(false);
+      }, [mode]);
+
+      const parseQuery = (q) => {
+        const match = q.trim().match(/^(PL|PEC|PDL|PLP|MPV|PLV|PRC|REQ|RIC|PDC|MSC|PLN|PFC|PFS)\s*(\d+)\s*\/\s*(\d{4})$/i);
+        if (match) return { sigla: match[1].toUpperCase(), numero: match[2], ano: match[3] };
+        const nums = q.trim().match(/^(\d+)\s*\/\s*(\d{4})$/);
+        if (nums) return { sigla: "PL", numero: nums[1], ano: nums[2] };
+        return null;
+      };
+
+      const handleSearchProposicao = async () => {
+        const parsed = parseQuery(query);
+        if (!parsed) {
+          addToast("Formato: PL 1234/2023", "warning");
+          return;
+        }
+        setLoading(true);
+        setResults([]);
+        try {
+          const data = await searchProposicoes(parsed.sigla, parsed.numero, parsed.ano);
+          setResults(data);
+          if (data.length === 0) addToast("Nenhuma proposição encontrada", "warning");
+          for (const item of data) {
+            try {
+              const det = await getProposicao(item.id);
+              setDetailsCache((prev) => ({ ...prev, [item.id]: det }));
+            } catch { /* ignore */ }
+          }
+        } catch (err) {
+          addToast("Erro ao buscar: " + err.message, "error");
+        }
+        setLoading(false);
+      };
+
+      const handleSearchDeputado = async () => {
+        if (query.trim().length < 2) {
+          addToast("Digite pelo menos 2 caracteres", "warning");
+          return;
+        }
+        setDepLoading(true);
+        setDeputados([]);
+        setSelectedDeputado(null);
+        setResults([]);
+        setDetailsCache({});
+        try {
+          const data = await searchDeputados(query.trim());
+          setDeputados(data);
+          if (data.length === 0) addToast("Nenhum deputado encontrado", "warning");
+        } catch (err) {
+          addToast("Erro ao buscar deputado: " + err.message, "error");
+        }
+        setDepLoading(false);
+      };
+
+      const loadDeputadoProposicoes = async (dep, role, page = 1) => {
+        setDepProjLoading(true);
+        setSelectedDeputado(dep);
+        setDeputadoRole(role);
+        setDepPage(page);
+        if (page === 1) {
+          setResults([]);
+          setDetailsCache({});
+        }
+        try {
+          const { dados, links } = await getProposicoesByDeputado(dep.id, role, page);
+          const nextLink = links.find((l) => l.rel === "next");
+          setHasMore(!!nextLink);
+          setResults((prev) => page === 1 ? dados : [...prev, ...dados]);
+          if (dados.length === 0 && page === 1) addToast("Nenhuma proposição encontrada para este deputado", "warning");
+          for (const item of dados) {
+            try {
+              const det = await getProposicao(item.id);
+              setDetailsCache((prev) => ({ ...prev, [item.id]: det }));
+            } catch { /* ignore */ }
+          }
+        } catch (err) {
+          addToast("Erro ao carregar proposições: " + err.message, "error");
+        }
+        setDepProjLoading(false);
+      };
+
+      const handleSearch = () => {
+        if (mode === "proposicao") handleSearchProposicao();
+        else handleSearchDeputado();
+      };
+
+      const bg = dark ? "#1a1a2e" : "#fff";
+      const overlay = "rgba(0,0,0,0.6)";
+
+      const modeTabStyle = (active) => ({
+        flex: 1,
+        padding: "10px 0",
+        border: "none",
+        borderBottom: active ? "3px solid #007A37" : `3px solid transparent`,
+        background: "none",
+        color: active ? (dark ? "#e5e7eb" : "#111827") : (dark ? "#6b7280" : "#9ca3af"),
+        fontWeight: active ? 800 : 500,
+        fontSize: 13,
+        cursor: "pointer",
+        transition: "all 0.2s",
+        textAlign: "center",
+      });
+
+      const roleChipStyle = (active) => ({
+        padding: "5px 14px",
+        borderRadius: 20,
+        border: active ? "2px solid #007A37" : `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+        background: active ? (dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.08)") : "transparent",
+        color: active ? "#007A37" : (dark ? "#9ca3af" : "#6b7280"),
+        fontSize: 12,
+        fontWeight: active ? 700 : 500,
+        cursor: "pointer",
+        transition: "all 0.15s",
+      });
+
+      return (
+        <div style={{ position: "fixed", inset: 0, background: overlay, zIndex: 1000, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: 60 }} onClick={onClose}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: bg, borderRadius: 16, width: "92%", maxWidth: 640, maxHeight: "80vh", overflow: "hidden", boxShadow: "0 20px 60px rgba(0,0,0,0.3)", display: "flex", flexDirection: "column" }}>
+
+            <div style={{ display: "flex", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}` }}>
+              <button style={modeTabStyle(mode === "proposicao")} onClick={() => setMode("proposicao")}>
+                📄 Por Proposição
+              </button>
+              <button style={modeTabStyle(mode === "deputado")} onClick={() => setMode("deputado")}>
+                👤 Por Deputado
+              </button>
+            </div>
+
+            <div style={{ padding: "16px 24px", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)"}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <h2 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                  {mode === "proposicao" ? "Buscar Proposição" : "Buscar por Deputado"}
+                </h2>
+                <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: dark ? "#9ca3af" : "#6b7280" }}>
+                  <Icons.X />
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  ref={inputRef}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                  placeholder={mode === "proposicao" ? "Ex: PL 1234/2023 ou PEC 45/2019" : "Nome do deputado(a)..."}
+                  style={{
+                    flex: 1,
+                    padding: "10px 14px",
+                    borderRadius: 8,
+                    border: `1px solid ${dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.15)"}`,
+                    background: dark ? "rgba(255,255,255,0.06)" : "#f9fafb",
+                    color: dark ? "#e5e7eb" : "#111827",
+                    fontSize: 14,
+                    outline: "none",
+                  }}
+                />
+                <button
+                  onClick={handleSearch}
+                  disabled={loading || depLoading}
+                  style={{
+                    padding: "10px 18px",
+                    borderRadius: 8,
+                    border: "none",
+                    background: "#007A37",
+                    color: "#fff",
+                    fontWeight: 700,
+                    fontSize: 13,
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    opacity: (loading || depLoading) ? 0.7 : 1,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  <Icons.Search /> Buscar
+                </button>
+              </div>
+              <p style={{ margin: "8px 0 0", fontSize: 11, color: dark ? "#6b7280" : "#9ca3af" }}>
+                {mode === "proposicao"
+                  ? "Tipos suportados: PL, PEC, PDL, PLP, MPV, PLV, PRC, PDC, MSC, PLN"
+                  : "Pesquise pelo nome (parcial) do deputado para ver suas proposições como autor ou relator"
+                }
+              </p>
+            </div>
+
+            <div style={{ flex: 1, overflow: "auto", padding: "16px 24px 24px" }}>
+              {(loading || depLoading) && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <CardSkeleton /><CardSkeleton />
+                </div>
+              )}
+
+              {mode === "deputado" && !selectedDeputado && !depLoading && deputados.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#6b7280" : "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
+                    {deputados.length} deputado(s) encontrado(s) — selecione para ver proposições
+                  </div>
+                  {deputados.map((dep) => (
+                    <div
+                      key={dep.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 14,
+                        padding: "12px 14px",
+                        borderRadius: 10,
+                        border: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+                        marginBottom: 8,
+                        cursor: "pointer",
+                        transition: "background 0.15s",
+                        background: dark ? "rgba(255,255,255,0.02)" : "transparent",
+                      }}
+                      onClick={() => loadDeputadoProposicoes(dep, "autor", 1)}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = dark ? "rgba(255,255,255,0.06)" : "rgba(0,122,55,0.04)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = dark ? "rgba(255,255,255,0.02)" : "transparent"; }}
+                    >
+                      {dep.urlFoto && (
+                        <img
+                          src={dep.urlFoto}
+                          alt={dep.nome}
+                          style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover", border: `2px solid ${dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)"}` }}
+                          onError={(e) => { e.target.style.display = "none"; }}
+                        />
+                      )}
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 700, fontSize: 14, color: dark ? "#e5e7eb" : "#111827" }}>
+                          {dep.nome}
+                        </div>
+                        <div style={{ fontSize: 12, color: dark ? "#6b7280" : "#9ca3af", marginTop: 2 }}>
+                          {dep.siglaPartido && <span style={{ fontWeight: 600 }}>{dep.siglaPartido}</span>}
+                          {dep.siglaUf && <span> — {dep.siglaUf}</span>}
+                        </div>
+                      </div>
+                      <div style={{ color: "#007A37", fontSize: 11, fontWeight: 700 }}>
+                        Ver proposições →
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {mode === "deputado" && selectedDeputado && (
+                <div>
+                  <div style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 14,
+                    padding: "14px 16px",
+                    borderRadius: 10,
+                    background: dark ? "rgba(0,122,55,0.1)" : "rgba(0,122,55,0.05)",
+                    border: `1px solid ${dark ? "rgba(0,122,55,0.2)" : "rgba(0,122,55,0.12)"}`,
+                    marginBottom: 14,
+                  }}>
+                    {selectedDeputado.urlFoto && (
+                      <img
+                        src={selectedDeputado.urlFoto}
+                        alt={selectedDeputado.nome}
+                        style={{ width: 40, height: 40, borderRadius: "50%", objectFit: "cover", border: "2px solid #007A37" }}
+                        onError={(e) => { e.target.style.display = "none"; }}
+                      />
+                    )}
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 800, fontSize: 14, color: dark ? "#e5e7eb" : "#111827" }}>
+                        {selectedDeputado.nome}
+                      </div>
+                      <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af" }}>
+                        {selectedDeputado.siglaPartido} — {selectedDeputado.siglaUf}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => { setSelectedDeputado(null); setResults([]); setDetailsCache({}); }}
+                      style={{ background: "none", border: "none", cursor: "pointer", color: dark ? "#9ca3af" : "#6b7280", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}
+                    >
+                      <Icons.X /> Trocar
+                    </button>
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                    <button
+                      style={roleChipStyle(deputadoRole === "autor")}
+                      onClick={() => loadDeputadoProposicoes(selectedDeputado, "autor", 1)}
+                    >
+                      Autor / Coautor
+                    </button>
+                    <button
+                      style={roleChipStyle(deputadoRole === "relator")}
+                      onClick={() => loadDeputadoProposicoes(selectedDeputado, "relator", 1)}
+                    >
+                      Relator
+                    </button>
+                  </div>
+
+                  {depProjLoading && results.length === 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      <CardSkeleton /><CardSkeleton /><CardSkeleton />
+                    </div>
+                  )}
+
+                  {!depProjLoading && results.length === 0 && (
+                    <p style={{ textAlign: "center", color: dark ? "#6b7280" : "#9ca3af", fontSize: 13, padding: "20px 0" }}>
+                      Nenhuma proposição encontrada como {deputadoRole === "autor" ? "autor/coautor" : "relator"}.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {results.map((item) => {
+                const det = detailsCache[item.id];
+                const status = det?.statusProposicao || {};
+                const monitored = monitoredIds.has(item.id);
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      padding: 16,
+                      borderRadius: 10,
+                      border: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div style={{ fontWeight: 800, fontSize: 15, color: dark ? "#e5e7eb" : "#111827", marginBottom: 4, fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                      {item.siglaTipo} {item.numero}/{item.ano}
+                    </div>
+                    <p style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", margin: "0 0 10px", lineHeight: 1.5 }}>
+                      {item.ementa}
+                    </p>
+                    {det && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                        <Badge {...apreciacaoBadge(status.apreciacao)} />
+                        <Badge {...regimeBadge(status.regime)} />
+                      </div>
+                    )}
+                    {!det && <Skeleton width={180} height={20} style={{ marginBottom: 10 }} />}
+                    <button
+                      onClick={() => !monitored && onAdd(det || item)}
+                      disabled={monitored}
+                      style={{
+                        padding: "6px 16px",
+                        borderRadius: 6,
+                        border: "none",
+                        background: monitored ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
+                        color: monitored ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: monitored ? "default" : "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
+                      {monitored ? <><Icons.Check /> Monitorando</> : <><Icons.Plus /> Monitorar</>}
+                    </button>
+                  </div>
+                );
+              })}
+
+              {mode === "deputado" && selectedDeputado && hasMore && !depProjLoading && results.length > 0 && (
+                <div style={{ textAlign: "center", padding: "12px 0" }}>
+                  <button
+                    onClick={() => loadDeputadoProposicoes(selectedDeputado, deputadoRole, depPage + 1)}
+                    style={{
+                      padding: "8px 24px",
+                      borderRadius: 8,
+                      border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+                      background: "none",
+                      color: "#007A37",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Carregar mais proposições...
+                  </button>
+                </div>
+              )}
+
+              {depProjLoading && results.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
+                  <CardSkeleton />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Filter Bar ────────────────────────────────────────────────────────
+    function FilterBar({ filters, setFilters, projects }) {
+      const { dark } = useContext(AppContext);
+      const [open, setOpen] = useState(false);
+
+      const tipos = [...new Set(projects.map((p) => p.siglaTipo))].sort();
+      const anos = [...new Set(projects.map((p) => p.ano))].sort().reverse();
+
+      const selectStyle = {
+        padding: "6px 10px",
+        borderRadius: 6,
+        border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+        background: dark ? "rgba(255,255,255,0.06)" : "#f9fafb",
+        color: dark ? "#e5e7eb" : "#111827",
+        fontSize: 12,
+        outline: "none",
+        cursor: "pointer",
+      };
+
+      return (
+        <div style={{ marginBottom: 16 }}>
+          <button onClick={() => setOpen(!open)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", color: dark ? "#9ca3af" : "#6b7280", fontSize: 12, fontWeight: 700, padding: "6px 0" }}>
+            <Icons.Filter /> {open ? "Ocultar Filtros" : "Filtros e Ordenação"}
+          </button>
+          {open && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 10, padding: 14, borderRadius: 10, background: dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)", border: `1px solid ${dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)"}` }}>
+              <select value={filters.tipo} onChange={(e) => setFilters((f) => ({ ...f, tipo: e.target.value }))} style={selectStyle}>
+                <option value="">Todos os tipos</option>
+                {tipos.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <select value={filters.ano} onChange={(e) => setFilters((f) => ({ ...f, ano: e.target.value }))} style={selectStyle}>
+                <option value="">Todos os anos</option>
+                {anos.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
+              <select value={filters.regime} onChange={(e) => setFilters((f) => ({ ...f, regime: e.target.value }))} style={selectStyle}>
+                <option value="">Todos os regimes</option>
+                <option value="urgencia">Urgência</option>
+                <option value="prioridade">Prioridade</option>
+                <option value="ordinario">Ordinário</option>
+              </select>
+              <select value={filters.apreciacao} onChange={(e) => setFilters((f) => ({ ...f, apreciacao: e.target.value }))} style={selectStyle}>
+                <option value="">Todas as apreciações</option>
+                <option value="plenario">Plenário</option>
+                <option value="comissao">Comissão</option>
+                <option value="conclusivo">Conclusivo</option>
+              </select>
+              <select value={filters.sort} onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value }))} style={selectStyle}>
+                <option value="urgencia">Urgência primeiro</option>
+                <option value="nome">Tipo/Número</option>
+                <option value="ano">Ano (recente)</option>
+              </select>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ─── Notification Center ───────────────────────────────────────────────
+    function NotificationCenter({ notifications, onClose, markRead, clearAll }) {
+      const { dark } = useContext(AppContext);
+      const bg = dark ? "#1a1a2e" : "#fff";
+
+      return (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1000, display: "flex", justifyContent: "flex-end" }} onClick={onClose}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: bg, width: "100%", maxWidth: 420, height: "100%", boxShadow: "-4px 0 20px rgba(0,0,0,0.2)", display: "flex", flexDirection: "column" }}>
+            <div style={{ padding: "20px 24px", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                Notificações
+              </h2>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                {notifications.length > 0 && (
+                  <button onClick={clearAll} style={{ background: "none", border: "none", fontSize: 11, fontWeight: 700, color: "#dc2626", cursor: "pointer" }}>
+                    Limpar tudo
+                  </button>
+                )}
+                <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: dark ? "#9ca3af" : "#6b7280" }}>
+                  <Icons.X />
+                </button>
+              </div>
+            </div>
+            <div style={{ flex: 1, overflow: "auto", padding: "12px 16px" }}>
+              {notifications.length === 0 && (
+                <p style={{ textAlign: "center", color: dark ? "#6b7280" : "#9ca3af", fontSize: 13, marginTop: 40 }}>
+                  Nenhuma notificação
+                </p>
+              )}
+              {notifications.map((n, i) => (
+                <div
+                  key={i}
+                  onClick={() => markRead(i)}
+                  style={{
+                    padding: "12px 14px",
+                    borderRadius: 8,
+                    marginBottom: 8,
+                    background: n.read
+                      ? "transparent"
+                      : dark ? "rgba(0,122,55,0.1)" : "rgba(0,122,55,0.05)",
+                    border: `1px solid ${
+                      n.priority === "high"
+                        ? "#dc2626"
+                        : dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)"
+                    }`,
+                    cursor: "pointer",
+                    transition: "background 0.2s",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <span style={{ fontWeight: 700, fontSize: 12, color: dark ? "#e5e7eb" : "#111827" }}>
+                      {n.projeto}
+                    </span>
+                    <span style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
+                      {n.date ? new Date(n.date).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : ""}
+                    </span>
+                  </div>
+                  {n.type && (
+                    <Badge
+                      label={n.type === "regime" ? "Mudança de Regime" : n.type === "apreciacao" ? "Mudança de Apreciação" : "Nova Tramitação"}
+                      color={n.type === "regime" ? "#fff" : n.type === "apreciacao" ? "#fff" : dark ? "#d1d5db" : "#374151"}
+                      bg={n.type === "regime" ? "#dc2626" : n.type === "apreciacao" ? "#2563eb" : dark ? "rgba(255,255,255,0.1)" : "#e5e7eb"}
+                      small
+                    />
+                  )}
+                  <p style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", margin: "6px 0 0", lineHeight: 1.5 }}>
+                    {n.message}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Project Details Page ──────────────────────────────────────────────
+    function ProjetoDetalhes({ project, onBack, addToast }) {
+      const { dark } = useContext(AppContext);
+      const [details, setDetails] = useState(null);
+      const [tramitacoes, setTramitacoes] = useState([]);
+      const [autores, setAutores] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [tab, setTab] = useState("tramitacoes");
+
+      useEffect(() => {
+        let cancelled = false;
+        (async () => {
+          setLoading(true);
+          try {
+            const [det, tram, aut] = await Promise.all([
+              getProposicao(project.id),
+              getTramitacoes(project.id),
+              getAutores(project.id),
+            ]);
+            if (!cancelled) {
+              setDetails(det);
+              setTramitacoes(tram);
+              setAutores(aut);
+            }
+          } catch (err) {
+            addToast("Erro ao carregar detalhes: " + err.message, "error");
+          }
+          if (!cancelled) setLoading(false);
+        })();
+        return () => { cancelled = true; };
+      }, [project.id]);
+
+      const status = details?.statusProposicao || project.statusProposicao || {};
+
+      const exportCSV = () => {
+        const header = "Data;Situação;Descrição;Órgão;Regime\n";
+        const rows = tramitacoes.map((t) =>
+          `${t.dataHora || ""};${t.descricaoSituacao || ""};${(t.descricaoTramitacao || "").replace(/;/g, ",")};${t.siglaOrgao || ""};${t.regime || ""}`
+        ).join("\n");
+        const blob = new Blob([header + rows], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${project.siglaTipo}_${project.numero}_${project.ano}_tramitacoes.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+        addToast("CSV exportado!", "success");
+      };
+
+      const tabStyle = (active) => ({
+        padding: "8px 18px",
+        border: "none",
+        borderBottom: active ? "3px solid #007A37" : "3px solid transparent",
+        background: "none",
+        color: active ? (dark ? "#e5e7eb" : "#111827") : (dark ? "#6b7280" : "#9ca3af"),
+        fontWeight: active ? 800 : 500,
+        fontSize: 13,
+        cursor: "pointer",
+        transition: "all 0.2s",
+      });
+
+      if (loading) {
+        return (
+          <div style={{ padding: 24 }}>
+            <Skeleton width="30%" height={28} style={{ marginBottom: 16 }} />
+            <Skeleton width="70%" height={16} style={{ marginBottom: 8 }} />
+            <Skeleton width="50%" height={16} style={{ marginBottom: 24 }} />
+            {[1,2,3,4,5].map((i) => <Skeleton key={i} height={60} style={{ marginBottom: 12 }} />)}
+          </div>
+        );
+      }
+
+      return (
+        <div style={{ padding: "0 4px" }}>
+          <div style={{ marginBottom: 24 }}>
+            <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", color: "#007A37", fontSize: 13, fontWeight: 700, marginBottom: 16, padding: 0 }}>
+              <Icons.Back /> Voltar
+            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
+              <h1 style={{ margin: 0, fontSize: 24, fontWeight: 900, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                {project.siglaTipo} {project.numero}/{project.ano}
+              </h1>
+              {isUrgente(status.regime) && (
+                <span style={{ color: "#dc2626", display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 700 }}>
+                  <Icons.Alert /> URGÊNCIA
+                </span>
+              )}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+              <Badge {...apreciacaoBadge(status.apreciacao)} />
+              <Badge {...regimeBadge(status.regime)} />
+              {status.descricaoSituacao && (
+                <Badge label={status.descricaoSituacao} color={dark ? "#d1d5db" : "#374151"} bg={dark ? "rgba(255,255,255,0.1)" : "#f3f4f6"} />
+              )}
+            </div>
+            <p style={{ fontSize: 14, color: dark ? "#9ca3af" : "#6b7280", lineHeight: 1.6, margin: 0 }}>
+              {details?.ementa || project.ementa}
+            </p>
+            {details?.keywords && (
+              <p style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", marginTop: 8 }}>
+                <strong>Palavras-chave:</strong> {details.keywords}
+              </p>
+            )}
+          </div>
+
+          {autores.length > 0 && (
+            <div style={{ marginBottom: 20, padding: "12px 16px", borderRadius: 8, background: dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)", border: `1px solid ${dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)"}` }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#6b7280" : "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+                Autores
+              </div>
+              <div style={{ fontSize: 13, color: dark ? "#d1d5db" : "#374151" }}>
+                {autores.map((a) => a.nome).join(", ")}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+            <button onClick={exportCSV} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 6, border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`, background: "none", color: dark ? "#d1d5db" : "#374151", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              <Icons.Download /> Exportar CSV
+            </button>
+            <a
+              href={`https://www.camara.leg.br/proposicoesWeb/fichadetramitacao?idProposicao=${project.id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 6, border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`, background: "none", color: "#007A37", fontSize: 12, fontWeight: 700, textDecoration: "none" }}
+            >
+              <Icons.External /> Ver na Câmara
+            </a>
+          </div>
+
+          <div style={{ display: "flex", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`, marginBottom: 20 }}>
+            <button style={tabStyle(tab === "tramitacoes")} onClick={() => setTab("tramitacoes")}>
+              Tramitações ({tramitacoes.length})
+            </button>
+          </div>
+
+          {tab === "tramitacoes" && (
+            <div style={{ position: "relative", paddingLeft: 28 }}>
+              <div style={{ position: "absolute", left: 8, top: 0, bottom: 0, width: 2, background: dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)" }} />
+              {tramitacoes.map((t, i) => {
+                const prevTram = tramitacoes[i + 1];
+                const regimeChanged = prevTram && t.regime && prevTram.regime && t.regime !== prevTram.regime;
+
+                return (
+                  <div key={i} style={{ position: "relative", marginBottom: 20, paddingBottom: 4 }}>
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: -22,
+                        top: 4,
+                        width: 12,
+                        height: 12,
+                        borderRadius: "50%",
+                        background: regimeChanged ? "#dc2626" : i === 0 ? "#007A37" : (dark ? "#4b5563" : "#d1d5db"),
+                        border: `2px solid ${dark ? "#1a1a2e" : "#fff"}`,
+                      }}
+                    />
+                    <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+                      <Icons.Clock />
+                      {t.dataHora ? new Date(t.dataHora).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                      {t.siglaOrgao && <span style={{ fontWeight: 700 }}>• {t.siglaOrgao}</span>}
+                    </div>
+                    {regimeChanged && (
+                      <div style={{ marginBottom: 6 }}>
+                        <Badge label={`Regime: ${prevTram.regime} → ${t.regime}`} color="#fff" bg="#dc2626" small />
+                      </div>
+                    )}
+                    {t.regime && !regimeChanged && (
+                      <div style={{ marginBottom: 4 }}>
+                        <Badge {...regimeBadge(t.regime)} small />
+                      </div>
+                    )}
+                    {t.descricaoSituacao && (
+                      <div style={{ fontWeight: 700, fontSize: 13, color: dark ? "#d1d5db" : "#374151", marginBottom: 2 }}>
+                        {t.descricaoSituacao}
+                      </div>
+                    )}
+                    <p style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", margin: 0, lineHeight: 1.5 }}>
+                      {t.descricaoTramitacao}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ─── Settings Modal ────────────────────────────────────────────────────
+    function SettingsModal({ onClose, settings, setSettings }) {
+      const { dark } = useContext(AppContext);
+      const bg = dark ? "#1a1a2e" : "#fff";
+
+      return (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 1000, display: "flex", justifyContent: "center", alignItems: "center" }} onClick={onClose}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: bg, borderRadius: 16, padding: 28, width: "90%", maxWidth: 420, boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                Configurações
+              </h2>
+              <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: dark ? "#9ca3af" : "#6b7280" }}>
+                <Icons.X />
+              </button>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, color: dark ? "#d1d5db" : "#374151" }}>
+                Intervalo de polling (min)
+                <input
+                  type="number"
+                  min={5}
+                  max={120}
+                  value={settings.pollingInterval}
+                  onChange={(e) => setSettings((s) => ({ ...s, pollingInterval: parseInt(e.target.value) || 30 }))}
+                  style={{
+                    width: 70,
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+                    background: dark ? "rgba(255,255,255,0.06)" : "#f9fafb",
+                    color: dark ? "#e5e7eb" : "#111827",
+                    fontSize: 13,
+                    textAlign: "center",
+                    outline: "none",
+                  }}
+                />
+              </label>
+              <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, color: dark ? "#d1d5db" : "#374151" }}>
+                Notificações push
+                <input
+                  type="checkbox"
+                  checked={settings.pushEnabled}
+                  onChange={(e) => setSettings((s) => ({ ...s, pushEnabled: e.target.checked }))}
+                  style={{ width: 18, height: 18, accentColor: "#007A37" }}
+                />
+              </label>
+              <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, color: dark ? "#d1d5db" : "#374151" }}>
+                Alerta sonoro para urgências
+                <input
+                  type="checkbox"
+                  checked={settings.soundEnabled}
+                  onChange={(e) => setSettings((s) => ({ ...s, soundEnabled: e.target.checked }))}
+                  style={{ width: 18, height: 18, accentColor: "#007A37" }}
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ─── MAIN APP ──────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════
+    function App() {
+      const [dark, setDark] = useState(() => loadStorage(STORAGE_KEYS.THEME, false));
+      const [projects, setProjects] = useState(() => loadStorage(STORAGE_KEYS.PROJECTS, []));
+      const [notifications, setNotifications] = useState(() => loadStorage(STORAGE_KEYS.NOTIFICATIONS, []));
+      const [settings, setSettings] = useState(() => loadStorage(STORAGE_KEYS.SETTINGS, { pollingInterval: 30, pushEnabled: true, soundEnabled: true }));
+
+      const [view, setView] = useState("dashboard");
+      const [selectedProject, setSelectedProject] = useState(null);
+      const [showSearch, setShowSearch] = useState(false);
+      const [showNotifications, setShowNotifications] = useState(false);
+      const [showSettings, setShowSettings] = useState(false);
+      const [toasts, setToasts] = useState([]);
+      const [refreshing, setRefreshing] = useState(false);
+      const [filters, setFilters] = useState({ tipo: "", ano: "", regime: "", apreciacao: "", sort: "urgencia" });
+      const [sidebarOpen, setSidebarOpen] = useState(false);
+
+      const monitoredIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
+      const unreadCount = notifications.filter((n) => !n.read).length;
+
+      useEffect(() => { saveStorage(STORAGE_KEYS.PROJECTS, projects); }, [projects]);
+      useEffect(() => { saveStorage(STORAGE_KEYS.NOTIFICATIONS, notifications); }, [notifications]);
+      useEffect(() => { saveStorage(STORAGE_KEYS.SETTINGS, settings); }, [settings]);
+      useEffect(() => { saveStorage(STORAGE_KEYS.THEME, dark); }, [dark]);
+
+      const addToast = useCallback((message, type = "success") => {
+        const id = Date.now();
+        setToasts((t) => [...t, { id, message, type }]);
+        setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4000);
+      }, []);
+      const dismissToast = useCallback((id) => setToasts((t) => t.filter((x) => x.id !== id)), []);
+
+      const addProject = useCallback(async (item) => {
+        let full = item;
+        if (!item.statusProposicao) {
+          try {
+            full = await getProposicao(item.id);
+          } catch {
+            full = item;
+          }
+        }
+        setProjects((prev) => {
+          if (prev.find((p) => p.id === full.id)) return prev;
+          return [full, ...prev];
+        });
+        addToast(`${full.siglaTipo || ""} ${full.numero || ""}/${full.ano || ""} adicionado ao monitoramento`);
+      }, [addToast]);
+
+      const removeProject = useCallback((id) => {
+        setProjects((prev) => prev.filter((p) => p.id !== id));
+        addToast("Projeto removido", "warning");
+      }, [addToast]);
+
+      const refreshAll = useCallback(async () => {
+        if (refreshing || projects.length === 0) return;
+        setRefreshing(true);
+        const lastTram = loadStorage(STORAGE_KEYS.LAST_TRAMITACOES, {});
+        const newNotifs = [];
+
+        for (const proj of projects) {
+          try {
+            const [updated, trams] = await Promise.all([
+              getProposicao(proj.id),
+              getTramitacoes(proj.id),
+            ]);
+
+            const oldStatus = proj.statusProposicao || {};
+            const newStatus = updated.statusProposicao || {};
+
+            if (oldStatus.regime && newStatus.regime && oldStatus.regime !== newStatus.regime) {
+              newNotifs.push({
+                projeto: `${proj.siglaTipo} ${proj.numero}/${proj.ano}`,
+                message: `Regime mudou: ${oldStatus.regime} → ${newStatus.regime}`,
+                type: "regime",
+                priority: "high",
+                date: new Date().toISOString(),
+                read: false,
+                projectId: proj.id,
+              });
+            }
+
+            if (oldStatus.apreciacao && newStatus.apreciacao && oldStatus.apreciacao !== newStatus.apreciacao) {
+              newNotifs.push({
+                projeto: `${proj.siglaTipo} ${proj.numero}/${proj.ano}`,
+                message: `Apreciação mudou: ${oldStatus.apreciacao} → ${newStatus.apreciacao}`,
+                type: "apreciacao",
+                priority: "high",
+                date: new Date().toISOString(),
+                read: false,
+                projectId: proj.id,
+              });
+            }
+
+            const lastKnown = lastTram[proj.id] || "";
+            if (trams.length > 0 && trams[0].dataHora && trams[0].dataHora !== lastKnown) {
+              if (lastKnown) {
+                newNotifs.push({
+                  projeto: `${proj.siglaTipo} ${proj.numero}/${proj.ano}`,
+                  message: trams[0].descricaoTramitacao || trams[0].descricaoSituacao || "Nova tramitação",
+                  type: "tramitacao",
+                  priority: "normal",
+                  date: new Date().toISOString(),
+                  read: false,
+                  projectId: proj.id,
+                });
+              }
+              lastTram[proj.id] = trams[0].dataHora;
+            }
+
+            setProjects((prev) => prev.map((p) => p.id === proj.id ? { ...p, ...updated } : p));
+          } catch (err) {
+            console.warn(`Failed to refresh ${proj.id}:`, err);
+          }
+        }
+
+        saveStorage(STORAGE_KEYS.LAST_TRAMITACOES, lastTram);
+
+        if (newNotifs.length > 0) {
+          setNotifications((prev) => [...newNotifs, ...prev]);
+          addToast(`${newNotifs.length} atualização(ões) encontrada(s)`);
+
+          if (settings.pushEnabled && "Notification" in window && Notification.permission === "granted") {
+            newNotifs.forEach((n) => {
+              new Notification(n.projeto, { body: n.message, icon: "🏛️" });
+            });
+          }
+        }
+
+        setRefreshing(false);
+      }, [projects, refreshing, settings.pushEnabled, addToast]);
+
+      useEffect(() => {
+        if (projects.length === 0) return;
+        const interval = setInterval(refreshAll, settings.pollingInterval * 60 * 1000);
+        return () => clearInterval(interval);
+      }, [projects.length, settings.pollingInterval, refreshAll]);
+
+      useEffect(() => {
+        if (settings.pushEnabled && "Notification" in window && Notification.permission === "default") {
+          Notification.requestPermission();
+        }
+      }, [settings.pushEnabled]);
+
+      const filtered = useMemo(() => {
+        let list = [...projects];
+        if (filters.tipo) list = list.filter((p) => p.siglaTipo === filters.tipo);
+        if (filters.ano) list = list.filter((p) => String(p.ano) === filters.ano);
+        if (filters.regime) {
+          list = list.filter((p) => {
+            const r = (p.statusProposicao?.regime || "").toLowerCase();
+            if (filters.regime === "urgencia") return r.includes("urgência") || r.includes("urgencia");
+            if (filters.regime === "prioridade") return r.includes("prioridade");
+            if (filters.regime === "ordinario") return r.includes("ordinário") || r.includes("ordinario");
+            return true;
+          });
+        }
+        if (filters.apreciacao) {
+          list = list.filter((p) => {
+            const a = (p.statusProposicao?.apreciacao || "").toLowerCase();
+            if (filters.apreciacao === "plenario") return a === "plenário" || a === "plenario";
+            if (filters.apreciacao === "comissao") return a.includes("comiss") && !a.includes("conclusivo");
+            if (filters.apreciacao === "conclusivo") return a.includes("conclusivo");
+            return true;
+          });
+        }
+        if (filters.sort === "urgencia") {
+          list.sort((a, b) => {
+            const ua = isUrgente(a.statusProposicao?.regime) ? 0 : 1;
+            const ub = isUrgente(b.statusProposicao?.regime) ? 0 : 1;
+            return ua - ub;
+          });
+        } else if (filters.sort === "ano") {
+          list.sort((a, b) => (b.ano || 0) - (a.ano || 0));
+        } else if (filters.sort === "nome") {
+          list.sort((a, b) => `${a.siglaTipo}${a.numero}`.localeCompare(`${b.siglaTipo}${b.numero}`));
+        }
+        return list;
+      }, [projects, filters]);
+
+      const markRead = (idx) => {
+        setNotifications((prev) => prev.map((n, i) => i === idx ? { ...n, read: true } : n));
+      };
+      const clearNotifications = () => setNotifications([]);
+
+      const theme = {
+        bg: dark ? "#0f0f1a" : "#f5f5f0",
+        surface: dark ? "#1a1a2e" : "#fff",
+        text: dark ? "#e5e7eb" : "#111827",
+        muted: dark ? "#6b7280" : "#9ca3af",
+        border: dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
+      };
+
+      return (
+        <AppContext.Provider value={{ dark }}>
+          <style>{`
+            @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;600;700;800;900&family=DM+Sans:wght@400;500;600;700;800&display=swap');
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body { font-family: 'DM Sans', -apple-system, sans-serif; }
+            @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+            @keyframes slideIn { from { transform: translateX(100px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+            @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+            ::-webkit-scrollbar { width: 6px; }
+            ::-webkit-scrollbar-track { background: transparent; }
+            ::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.3); border-radius: 3px; }
+            ::selection { background: #007A3740; }
+            input::placeholder { color: ${dark ? "#4b5563" : "#adb5bd"}; }
+          `}</style>
+
+          <div style={{ minHeight: "100vh", background: theme.bg, color: theme.text, transition: "background 0.3s, color 0.3s" }}>
+            <ToastContainer toasts={toasts} dismiss={dismissToast} />
+
+            <header style={{
+              position: "sticky",
+              top: 0,
+              zIndex: 100,
+              background: dark ? "rgba(15,15,26,0.92)" : "rgba(245,245,240,0.92)",
+              backdropFilter: "blur(12px)",
+              borderBottom: `1px solid ${theme.border}`,
+              padding: "0 20px",
+            }}>
+              <div style={{ maxWidth: 1200, margin: "0 auto", height: 56, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <button
+                    onClick={() => setSidebarOpen(!sidebarOpen)}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: theme.text, display: "flex", padding: 4 }}
+                  >
+                    <Icons.Menu />
+                  </button>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 28, height: 28, borderRadius: 6, background: "#007A37", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 14, fontWeight: 900 }}>
+                      L
+                    </div>
+                    <span style={{ fontFamily: "'Source Serif 4', Georgia, serif", fontWeight: 800, fontSize: 16, letterSpacing: "-0.02em" }}>
+                      LegisTracker
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <button
+                    onClick={refreshAll}
+                    disabled={refreshing}
+                    title="Atualizar todos"
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      color: refreshing ? "#007A37" : theme.muted,
+                      padding: 6,
+                      borderRadius: 6,
+                      display: "flex",
+                      animation: refreshing ? "pulse 1s infinite" : "none",
+                    }}
+                  >
+                    <Icons.Refresh />
+                  </button>
+                  <button
+                    onClick={() => setShowSearch(true)}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: theme.muted, padding: 6, borderRadius: 6, display: "flex" }}
+                    title="Buscar proposição"
+                  >
+                    <Icons.Search />
+                  </button>
+                  <button
+                    onClick={() => setShowNotifications(true)}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: theme.muted, padding: 6, borderRadius: 6, display: "flex", position: "relative" }}
+                    title="Notificações"
+                  >
+                    <Icons.Bell />
+                    {unreadCount > 0 && (
+                      <span style={{
+                        position: "absolute",
+                        top: 0,
+                        right: 0,
+                        width: 16,
+                        height: 16,
+                        borderRadius: "50%",
+                        background: "#dc2626",
+                        color: "#fff",
+                        fontSize: 9,
+                        fontWeight: 800,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}>
+                        {unreadCount}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setShowSettings(true)}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: theme.muted, padding: 6, borderRadius: 6, display: "flex" }}
+                    title="Configurações"
+                  >
+                    <Icons.Settings />
+                  </button>
+                  <button
+                    onClick={() => setDark(!dark)}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: theme.muted, padding: 6, borderRadius: 6, display: "flex" }}
+                    title={dark ? "Tema claro" : "Tema escuro"}
+                  >
+                    {dark ? <Icons.Sun /> : <Icons.Moon />}
+                  </button>
+                </div>
+              </div>
+            </header>
+
+            <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", gap: 0, position: "relative" }}>
+              {sidebarOpen && (
+                <>
+                  <div
+                    onClick={() => setSidebarOpen(false)}
+                    style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.3)", zIndex: 50 }}
+                  />
+                  <aside style={{
+                    position: "fixed",
+                    left: 0,
+                    top: 56,
+                    bottom: 0,
+                    width: 280,
+                    background: theme.surface,
+                    borderRight: `1px solid ${theme.border}`,
+                    zIndex: 60,
+                    overflow: "auto",
+                    padding: "16px 12px",
+                    animation: "fadeIn 0.2s ease",
+                  }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: theme.muted, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 12, padding: "0 8px" }}>
+                      Projetos Monitorados ({projects.length})
+                    </div>
+                    {projects.map((p) => (
+                      <div
+                        key={p.id}
+                        onClick={() => { setSelectedProject(p); setView("details"); setSidebarOpen(false); }}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: 8,
+                          cursor: "pointer",
+                          marginBottom: 4,
+                          background: selectedProject?.id === p.id ? (dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.08)") : "transparent",
+                          borderLeft: isUrgente(p.statusProposicao?.regime) ? "3px solid #dc2626" : "3px solid transparent",
+                          transition: "background 0.15s",
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, fontSize: 13, color: theme.text }}>
+                          {p.siglaTipo} {p.numero}/{p.ano}
+                        </div>
+                        <div style={{ fontSize: 10, color: theme.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {p.ementa?.slice(0, 60)}…
+                        </div>
+                      </div>
+                    ))}
+                    {projects.length === 0 && (
+                      <p style={{ fontSize: 12, color: theme.muted, padding: "0 8px" }}>
+                        Nenhum projeto monitorado. Use o botão de busca para adicionar.
+                      </p>
+                    )}
+                  </aside>
+                </>
+              )}
+
+              <main style={{ flex: 1, padding: "24px 20px", minHeight: "calc(100vh - 56px)" }}>
+                {view === "dashboard" && (
+                  <div style={{ animation: "fadeIn 0.3s ease" }}>
+                    <div style={{ marginBottom: 24 }}>
+                      <h1 style={{ fontSize: 22, fontWeight: 900, fontFamily: "'Source Serif 4', Georgia, serif", marginBottom: 4, letterSpacing: "-0.02em" }}>
+                        Dashboard
+                      </h1>
+                      <p style={{ fontSize: 13, color: theme.muted }}>
+                        Acompanhamento de proposições legislativas
+                      </p>
+                    </div>
+
+                    <SummaryPanel projects={projects} />
+                    <FilterBar filters={filters} setFilters={setFilters} projects={projects} />
+
+                    {filtered.length === 0 && projects.length === 0 && (
+                      <div style={{
+                        textAlign: "center",
+                        padding: "60px 20px",
+                        borderRadius: 16,
+                        background: dark ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.02)",
+                        border: `2px dashed ${theme.border}`,
+                      }}>
+                        <div style={{ fontSize: 48, marginBottom: 16 }}>🏛️</div>
+                        <h3 style={{ fontFamily: "'Source Serif 4', Georgia, serif", fontWeight: 800, marginBottom: 8, fontSize: 18 }}>
+                          Nenhum projeto monitorado
+                        </h3>
+                        <p style={{ color: theme.muted, fontSize: 13, marginBottom: 20 }}>
+                          Comece buscando uma proposição para adicionar ao acompanhamento.
+                        </p>
+                        <button
+                          onClick={() => setShowSearch(true)}
+                          style={{
+                            padding: "10px 24px",
+                            borderRadius: 8,
+                            border: "none",
+                            background: "#007A37",
+                            color: "#fff",
+                            fontWeight: 700,
+                            fontSize: 14,
+                            cursor: "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 8,
+                          }}
+                        >
+                          <Icons.Search /> Buscar Proposição
+                        </button>
+                      </div>
+                    )}
+
+                    {filtered.length === 0 && projects.length > 0 && (
+                      <p style={{ color: theme.muted, fontSize: 13, textAlign: "center", padding: 40 }}>
+                        Nenhum projeto corresponde aos filtros selecionados.
+                      </p>
+                    )}
+
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 14 }}>
+                      {filtered.map((p) => (
+                        <ProjetoCard
+                          key={p.id}
+                          project={p}
+                          onSelect={(proj) => { setSelectedProject(proj); setView("details"); }}
+                          onRemove={removeProject}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {view === "details" && selectedProject && (
+                  <ProjetoDetalhes
+                    project={selectedProject}
+                    onBack={() => { setView("dashboard"); setSelectedProject(null); }}
+                    addToast={addToast}
+                  />
+                )}
+              </main>
+            </div>
+
+            {showSearch && (
+              <SearchModal
+                onClose={() => setShowSearch(false)}
+                onAdd={(item) => { addProject(item); setShowSearch(false); }}
+                monitoredIds={monitoredIds}
+                addToast={addToast}
+              />
+            )}
+
+            {showNotifications && (
+              <NotificationCenter
+                notifications={notifications}
+                onClose={() => setShowNotifications(false)}
+                markRead={markRead}
+                clearAll={clearNotifications}
+              />
+            )}
+
+            {showSettings && (
+              <SettingsModal
+                onClose={() => setShowSettings(false)}
+                settings={settings}
+                setSettings={setSettings}
+              />
+            )}
+
+            <button
+              onClick={() => setShowSearch(true)}
+              style={{
+                position: "fixed",
+                bottom: 24,
+                right: 24,
+                width: 52,
+                height: 52,
+                borderRadius: "50%",
+                background: "#007A37",
+                color: "#fff",
+                border: "none",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                boxShadow: "0 4px 16px rgba(0,122,55,0.3)",
+                zIndex: 40,
+                transition: "transform 0.2s, box-shadow 0.2s",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.transform = "scale(1.1)"; e.currentTarget.style.boxShadow = "0 6px 24px rgba(0,122,55,0.4)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,122,55,0.3)"; }}
+              title="Buscar e adicionar proposição"
+            >
+              <Icons.Plus />
+            </button>
+          </div>
+        </AppContext.Provider>
+      );
+    }
+
+    // ─── Inicializando o React no DOM ──────────────────────────────────────
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
