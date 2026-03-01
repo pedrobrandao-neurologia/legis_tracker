@@ -236,7 +236,7 @@
         return { dados, links: [] };
       }
       const params = {
-        ordem: "DESC", ordenarPor: "id", itens: 20, pagina,
+        ordem: "DESC", ordenarPor: "id", itens: 100, pagina,
       };
       if (role === "autor") params.idDeputadoAutor = deputadoId;
       else params.idDeputadoAutor = deputadoId;
@@ -277,6 +277,91 @@
       }
       const data = await apiFetch(`/proposicoes/${id}/autores`);
       return data.dados || [];
+    }
+    
+    // ─── Related Propositions (EMD, REC, DTQ, REQ/RPD) ─────────────────────
+    // Types of procedural documents that attach to a main bill
+    const TIPOS_ACESSORIOS = ["EMC", "EMP", "EMD", "EMS", "SBT", "REQ", "REC", "DTQ", "RPD", "ERD", "ESB", "PAR", "VTS"];
+    // Labels for display
+    const TIPO_ACESSORIO_LABELS = {
+      EMC: "Emenda de Comissão",
+      EMP: "Emenda de Plenário",
+      EMD: "Emenda",
+      EMS: "Emenda do Senado",
+      SBT: "Substitutivo",
+      REQ: "Requerimento",
+      REC: "Recurso",
+      DTQ: "Destaque",
+      RPD: "Redação do Plenário",
+      ERD: "Errata",
+      ESB: "Emenda ao Substitutivo",
+      PAR: "Parecer",
+      VTS: "Voto em Separado",
+    };
+    
+    // Mock related propositions
+    const MOCK_RELACIONADAS = {
+      2120019: [
+        { id: 9990001, siglaTipo: "EMC", numero: 1, ano: 2023, ementa: "Acrescenta dispositivo ao PL 1234/2023 para incluir a obrigatoriedade de auditoria algorítmica em sistemas de IA de alto risco.", codTipoTramitacao: "920" },
+        { id: 9990002, siglaTipo: "EMC", numero: 2, ano: 2023, ementa: "Modifica o art. 5º do PL 1234/2023 para incluir a proteção de dados pessoais como princípio fundamental do uso de IA.", codTipoTramitacao: "920" },
+        { id: 9990003, siglaTipo: "REQ", numero: 101, ano: 2023, ementa: "Requer a realização de audiência pública para debater o PL 1234/2023 com especialistas em inteligência artificial.", codTipoTramitacao: "318" },
+        { id: 9990004, siglaTipo: "DTQ", numero: 1, ano: 2025, ementa: "Destaque para votação em separado do art. 12 do Substitutivo ao PL 1234/2023, que trata de responsabilidade civil.", codTipoTramitacao: "900" },
+      ],
+      2258616: [
+        { id: 9990010, siglaTipo: "EMC", numero: 1, ano: 2019, ementa: "Emenda à PEC 45/2019 para manter a cumulatividade parcial do IBS durante período de transição.", codTipoTramitacao: "920" },
+        { id: 9990011, siglaTipo: "REC", numero: 1, ano: 2024, ementa: "Recurso contra apreciação conclusiva da CFT, solicitando deliberação pelo Plenário da Câmara.", codTipoTramitacao: "316" },
+        { id: 9990012, siglaTipo: "REQ", numero: 55, ano: 2024, ementa: "Requer regime de urgência para tramitação da PEC 45/2019.", codTipoTramitacao: "318" },
+        { id: 9990013, siglaTipo: "SBT", numero: 1, ano: 2024, ementa: "Substitutivo à PEC 45/2019 apresentado pelo relator na Comissão Especial.", codTipoTramitacao: "920" },
+      ],
+      2236340: [
+        { id: 9990020, siglaTipo: "EMP", numero: 1, ano: 2024, ementa: "Emenda de Plenário ao PL 2630/2020 para incluir regras específicas sobre deepfakes geradas por IA.", codTipoTramitacao: "920" },
+        { id: 9990021, siglaTipo: "DTQ", numero: 1, ano: 2024, ementa: "Destaque para votação em separado do artigo que trata de remoção compulsória de conteúdo.", codTipoTramitacao: "900" },
+        { id: 9990022, siglaTipo: "REQ", numero: 200, ano: 2024, ementa: "Requer urgência urgentíssima para apreciação do PL 2630/2020.", codTipoTramitacao: "318" },
+      ],
+      2284877: [
+        { id: 9990030, siglaTipo: "EMC", numero: 1, ano: 2023, ementa: "Acrescenta parágrafo ao art. 3º para incluir prescrição digital no âmbito da telessaúde.", codTipoTramitacao: "920" },
+        { id: 9990031, siglaTipo: "REQ", numero: 45, ano: 2024, ementa: "Requer audiência pública com representantes do CFM sobre telemedicina.", codTipoTramitacao: "318" },
+      ],
+      2190752: [
+        { id: 9990040, siglaTipo: "EMC", numero: 1, ano: 2024, ementa: "Emenda ao PLP 68/2024 para exclusão de medicamentos essenciais da incidência do IBS.", codTipoTramitacao: "920" },
+        { id: 9990041, siglaTipo: "EMC", numero: 2, ano: 2024, ementa: "Emenda para reduzir a alíquota do Imposto Seletivo sobre veículos elétricos.", codTipoTramitacao: "920" },
+        { id: 9990042, siglaTipo: "DTQ", numero: 1, ano: 2024, ementa: "Destaque para votação em separado do dispositivo sobre cashback para famílias de baixa renda.", codTipoTramitacao: "900" },
+        { id: 9990043, siglaTipo: "DTQ", numero: 2, ano: 2024, ementa: "Destaque para votação em separado da alíquota da cesta básica.", codTipoTramitacao: "900" },
+        { id: 9990044, siglaTipo: "REC", numero: 1, ano: 2024, ementa: "Recurso para apreciação pelo Plenário das emendas rejeitadas na CFT.", codTipoTramitacao: "316" },
+        { id: 9990045, siglaTipo: "RPD", numero: 1, ano: 2024, ementa: "Redação para o segundo turno de votação do PLP 68/2024.", codTipoTramitacao: "920" },
+      ],
+    };
+    
+    async function getRelacionadas(id) {
+      if (DEMO_MODE) {
+        return MOCK_RELACIONADAS[id] || [];
+      }
+      try {
+        const data = await apiFetch(`/proposicoes/${id}/relacionadas`);
+        const relacionadas = data.dados || [];
+        // Filter to only return procedural/accessory types
+        return relacionadas.filter((r) => TIPOS_ACESSORIOS.includes(r.siglaTipo));
+      } catch {
+        // Fallback: search for propositions that reference this one
+        try {
+          const results = [];
+          for (const tipo of ["EMC", "EMP", "REQ", "REC", "DTQ", "RPD"]) {
+            try {
+              const data = await apiFetch("/proposicoes", {
+                siglaTipo: tipo,
+                idProposicaoPrincipal: id,
+                itens: 50,
+                ordem: "DESC",
+                ordenarPor: "id",
+              });
+              if (data.dados) results.push(...data.dados);
+            } catch { /* skip this type */ }
+          }
+          return results;
+        } catch {
+          return [];
+        }
+      }
     }
     
     // ─── Regimento Interno Reference Data ───────────────────────────────────
@@ -376,6 +461,105 @@
         "PRC": { nome: "Projeto de Resolução da Câmara", descricao: "Regula matérias de competência privativa da Câmara dos Deputados.", tramitacao: "Tramitação interna à Câmara." },
         "REQ": { nome: "Requerimento", descricao: "Solicitação feita por deputado ou comissão para deliberação do Plenário ou de comissão.", tramitacao: "Apreciação imediata ou na sessão seguinte." },
         "RIC": { nome: "Requerimento de Informação", descricao: "Pedido de informações a Ministro de Estado ou autoridades (Art. 50, §2º CF).", tramitacao: "Prazo de 30 dias para resposta." },
+      },
+      documentosAcessorios: {
+        "EMC": {
+          nome: "Emenda de Comissão",
+          artigos: "Art. 119 e 120 RICD",
+          descricao: "Proposição apresentada por membro da comissão que analisa o projeto, propondo alterações ao texto original. Pode ser supressiva, aglutinativa, modificativa, substitutiva ou aditiva.",
+          impacto: "Pode alterar substancialmente o conteúdo do projeto. Se aprovada, modifica o texto que será votado.",
+          interpretacao: "Indica que há interesse da comissão em ajustar o projeto. Muitas EMCs sinalizam negociação ativa para viabilizar a aprovação.",
+        },
+        "EMP": {
+          nome: "Emenda de Plenário",
+          artigos: "Art. 120 RICD",
+          descricao: "Emenda apresentada em Plenário durante a discussão da matéria. Pode ser oferecida por qualquer deputado. Requer parecer da comissão pertinente.",
+          impacto: "Pode modificar o projeto durante a votação final. Cada emenda é votada separadamente.",
+          interpretacao: "Emendas de Plenário indicam que o texto das comissões não contemplou todos os interesses. Alta atividade de EMPs sugere projeto controverso.",
+        },
+        "EMD": {
+          nome: "Emenda",
+          artigos: "Art. 118 a 125 RICD",
+          descricao: "Proposição acessória que altera parcial ou totalmente outra proposição principal. Pode ser de cinco tipos: supressiva, aglutinativa, substitutiva, modificativa e aditiva (Art. 118, §§ 1-7).",
+          impacto: "Emendas são o principal instrumento de modificação do texto legislativo durante a tramitação.",
+          interpretacao: "O volume e tipo de emendas indicam o grau de controvérsia e negociação política em torno do projeto.",
+        },
+        "EMS": {
+          nome: "Emenda do Senado",
+          artigos: "Art. 65 CF",
+          descricao: "Emenda feita pelo Senado Federal ao projeto aprovado pela Câmara. Retorna à Câmara apenas para apreciação das emendas senatoriais.",
+          impacto: "Indica que o Senado modificou o texto. A Câmara pode aceitar ou rejeitar as emendas do Senado.",
+          interpretacao: "Se houver muitas emendas do Senado, pode haver atraso na tramitação pelo vai-e-vem entre as Casas.",
+        },
+        "SBT": {
+          nome: "Substitutivo",
+          artigos: "Art. 118, §4º RICD",
+          descricao: "Emenda que altera substancial ou formalmente o conjunto da proposição original. Equivale a um novo projeto apresentado em lugar do original.",
+          impacto: "Muito alto — substitui integralmente o texto original do projeto. É a forma mais radical de alteração.",
+          interpretacao: "Um substitutivo indica que o texto original foi considerado insuficiente e que houve reescrita completa pelo relator. Geralmente resulta de extensas negociações.",
+        },
+        "REQ": {
+          nome: "Requerimento",
+          artigos: "Art. 114 a 117 RICD",
+          descricao: "Solicitação formal de deputado ou comissão ao Presidente da Câmara ou da comissão. Inclui: urgência, audiência pública, adiamento, retirada de pauta, inversão de pauta, etc.",
+          impacto: "Varia conforme o tipo. Requerimento de urgência tem impacto máximo na celeridade.",
+          interpretacao: "O tipo de requerimento revela a estratégia parlamentar: urgência = acelerar; adiamento = ganhar tempo; audiência = buscar legitimidade; informação = exercer controle.",
+          subtipos: {
+            "Urgência": "Art. 153-155 — Acelera radicalmente a tramitação, dispensando interstícios.",
+            "Audiência Pública": "Art. 255-258 — Busca subsídios técnicos e dá visibilidade, mas pode atrasar.",
+            "Adiamento de Discussão": "Art. 177 — Posterga a discussão, sinal de falta de consenso.",
+            "Adiamento de Votação": "Art. 191 — Posterga a votação, sinal de que não há votos suficientes.",
+            "Retirada de Pauta": "Art. 104 — Retira a matéria da Ordem do Dia, sinal de recuo estratégico.",
+            "Inversão de Pauta": "Art. 160 — Muda a ordem de votação, pode ser usado para priorizar ou postergar.",
+          },
+        },
+        "REC": {
+          nome: "Recurso",
+          artigos: "Art. 132, §2º RICD",
+          descricao: "Recurso contra decisão de comissão com poder conclusivo, solicitando que a matéria seja apreciada pelo Plenário. Requer assinatura de 1/10 dos membros da Câmara (52 deputados).",
+          impacto: "Alto — leva a matéria ao Plenário mesmo quando o rito permitia aprovação apenas em comissão.",
+          interpretacao: "Um recurso indica forte oposição à decisão da comissão. Sinaliza que há deputados que discordam da posição adotada e querem ampla deliberação. Pode atrasar significativamente a tramitação.",
+        },
+        "DTQ": {
+          nome: "Destaque",
+          artigos: "Art. 161 RICD",
+          descricao: "Requerimento para votação em separado de parte da proposição (artigo, parágrafo, inciso, emenda). Permite que trechos específicos sejam destacados para deliberação individual.",
+          impacto: "Médio a alto — pode alterar pontos específicos do projeto sem rejeitar o todo.",
+          interpretacao: "Destaques são instrumento estratégico da oposição e de blocos insatisfeitos com pontos específicos. Alto número de DTQs indica projeto com muitos pontos controversos e pode prolongar significativamente a sessão de votação.",
+          subtipos: {
+            "Para Votação em Separado (DVS)": "Destaca emenda ou dispositivo para votação individual.",
+            "Para Supressão": "Visa retirar dispositivo específico do texto.",
+            "Para Alteração": "Propõe nova redação a dispositivo específico.",
+          },
+        },
+        "RPD": {
+          nome: "Redação do Plenário",
+          artigos: "Art. 194 RICD",
+          descricao: "Redação final da matéria após aprovação em primeiro turno pelo Plenário. Consolida as emendas aprovadas e o texto original em uma versão final para o segundo turno ou para envio ao Senado.",
+          impacto: "Baixo — documento consolidado, não altera o mérito. Mas erros na redação podem gerar recursos.",
+          interpretacao: "A RPD indica que o projeto foi aprovado em ao menos um turno e está em fase de consolidação textual.",
+        },
+        "ERD": {
+          nome: "Errata",
+          artigos: "Art. 126 RICD",
+          descricao: "Correção de erros materiais no texto da proposição. Não altera o mérito.",
+          impacto: "Baixo — correção formal sem alteração de conteúdo.",
+          interpretacao: "Erratas indicam que houve problemas de redação. Podem ser usadas para ajustes pontuais.",
+        },
+        "PAR": {
+          nome: "Parecer",
+          artigos: "Art. 126 a 131 RICD",
+          descricao: "Manifestação da comissão sobre a matéria, elaborada pelo relator. Pode ser pela aprovação, aprovação com substitutivo, ou rejeição.",
+          impacto: "Alto — o parecer orienta a votação e define o texto que será deliberado.",
+          interpretacao: "Parecer favorável sinaliza avanço. Parecer com substitutivo indica reformulação. Parecer contrário pode arquivar o projeto se não houver recurso.",
+        },
+        "VTS": {
+          nome: "Voto em Separado",
+          artigos: "Art. 56, §1º RICD",
+          descricao: "Manifestação de membro da comissão que diverge do parecer do relator. É publicado junto com o parecer principal.",
+          impacto: "Médio — pode influenciar a votação em Plenário ao apresentar visão alternativa.",
+          interpretacao: "Votos em separado sinalizam divisão dentro da comissão. Se muitos, indicam que o parecer do relator não tem consenso.",
+        },
       },
       situacoes: {
         "Aguardando Deliberação": "A proposição está na Ordem do Dia, pronta para ser votada quando for incluída na pauta.",
@@ -946,7 +1130,7 @@
     }
     
     // ─── Search Modal ──────────────────────────────────────────────────────
-    function SearchModal({ onClose, onAdd, monitoredIds, addToast }) {
+    function SearchModal({ onClose, onAdd, onAddMultiple, monitoredIds, addToast }) {
       const { dark } = useContext(AppContext);
       const [mode, setMode] = useState("proposicao"); // proposicao | deputado
       const [query, setQuery] = useState("");
@@ -963,6 +1147,7 @@
       const [depProjLoading, setDepProjLoading] = useState(false);
       const [depPage, setDepPage] = useState(1);
       const [hasMore, setHasMore] = useState(false);
+      const [loadingAll, setLoadingAll] = useState(false);
     
       useEffect(() => { inputRef.current?.focus(); }, [mode]);
     
@@ -1058,6 +1243,34 @@
           addToast("Erro ao carregar proposições: " + err.message, "error");
         }
         setDepProjLoading(false);
+      };
+    
+      // Load all pages automatically
+      const loadAllProposicoes = async () => {
+        if (!selectedDeputado || loadingAll) return;
+        setLoadingAll(true);
+        let page = depPage + 1;
+        let moreToLoad = hasMore;
+        while (moreToLoad) {
+          try {
+            const { dados, links } = await getProposicoesByDeputado(selectedDeputado.id, deputadoRole, page);
+            const nextLink = links.find((l) => l.rel === "next");
+            moreToLoad = !!nextLink;
+            setResults((prev) => [...prev, ...dados]);
+            setDepPage(page);
+            setHasMore(moreToLoad);
+            // Fetch details in background (don't await)
+            for (const item of dados) {
+              getProposicao(item.id).then((det) => {
+                setDetailsCache((prev) => ({ ...prev, [item.id]: det }));
+              }).catch(() => {});
+            }
+            page++;
+          } catch {
+            moreToLoad = false;
+          }
+        }
+        setLoadingAll(false);
       };
     
       const handleSearch = () => {
@@ -1280,6 +1493,64 @@
                     </button>
                   </div>
     
+                  {/* Monitorar Todos button */}
+                  {!depProjLoading && results.length > 0 && (() => {
+                    const unmonitored = results.filter((r) => !monitoredIds.has(r.id));
+                    const allMonitored = unmonitored.length === 0;
+                    return (
+                      <div style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        padding: "10px 14px",
+                        borderRadius: 8,
+                        background: dark ? "rgba(0,122,55,0.08)" : "rgba(0,122,55,0.04)",
+                        border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.1)"}`,
+                        marginBottom: 14,
+                      }}>
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: dark ? "#e5e7eb" : "#111827" }}>
+                            {results.length} proposição(ões) encontrada(s)
+                          </div>
+                          <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
+                            {allMonitored ? "Todas já estão sendo monitoradas" : `${unmonitored.length} ainda não monitorada(s)`}
+                            {hasMore && " — carregue mais para ver todas"}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (allMonitored) return;
+                            // Get the full details from cache when available
+                            const toAdd = unmonitored.map((r) => detailsCache[r.id] || r);
+                            onAddMultiple(toAdd);
+                            addToast(`${toAdd.length} proposição(ões) adicionada(s) ao monitoramento`);
+                          }}
+                          disabled={allMonitored}
+                          style={{
+                            padding: "8px 18px",
+                            borderRadius: 6,
+                            border: "none",
+                            background: allMonitored ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
+                            color: allMonitored ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
+                            fontWeight: 700,
+                            fontSize: 12,
+                            cursor: allMonitored ? "default" : "pointer",
+                            whiteSpace: "nowrap",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                          }}
+                        >
+                          {allMonitored ? (
+                            <><Icons.Check /> Todos monitorados</>
+                          ) : (
+                            <><Icons.Plus /> Monitorar Todos ({unmonitored.length})</>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })()}
+    
                   {depProjLoading && results.length === 0 && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                       <CardSkeleton /><CardSkeleton /><CardSkeleton />
@@ -1347,7 +1618,7 @@
     
               {/* Load more for deputy mode */}
               {mode === "deputado" && selectedDeputado && hasMore && !depProjLoading && results.length > 0 && (
-                <div style={{ textAlign: "center", padding: "12px 0" }}>
+                <div style={{ textAlign: "center", padding: "12px 0", display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
                   <button
                     onClick={() => loadDeputadoProposicoes(selectedDeputado, deputadoRole, depPage + 1)}
                     style={{
@@ -1362,6 +1633,22 @@
                     }}
                   >
                     Carregar mais proposições...
+                  </button>
+                  <button
+                    onClick={loadAllProposicoes}
+                    disabled={loadingAll}
+                    style={{
+                      padding: "8px 24px",
+                      borderRadius: 8,
+                      border: "none",
+                      background: loadingAll ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
+                      color: loadingAll ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: loadingAll ? "default" : "pointer",
+                    }}
+                  >
+                    {loadingAll ? "Carregando todas..." : "Carregar Todas as Proposições"}
                   </button>
                 </div>
               )}
@@ -1517,6 +1804,8 @@
       const [details, setDetails] = useState(null);
       const [tramitacoes, setTramitacoes] = useState([]);
       const [autores, setAutores] = useState([]);
+      const [relacionadas, setRelacionadas] = useState([]);
+      const [relLoading, setRelLoading] = useState(false);
       const [loading, setLoading] = useState(true);
       const [tab, setTab] = useState("tramitacoes");
     
@@ -1539,6 +1828,16 @@
             addToast("Erro ao carregar detalhes: " + err.message, "error");
           }
           if (!cancelled) setLoading(false);
+    
+          // Fetch related documents (EMDs, RECs, DTQs, etc.) in background
+          if (!cancelled) {
+            setRelLoading(true);
+            try {
+              const rel = await getRelacionadas(project.id);
+              if (!cancelled) setRelacionadas(rel);
+            } catch { /* ignore */ }
+            if (!cancelled) setRelLoading(false);
+          }
         })();
         return () => { cancelled = true; };
       }, [project.id]);
@@ -1654,6 +1953,9 @@
             </button>
             <button style={tabStyle(tab === "estrategia")} onClick={() => setTab("estrategia")}>
               Estratégia
+            </button>
+            <button style={tabStyle(tab === "documentos")} onClick={() => setTab("documentos")}>
+              Documentos ({relLoading ? "..." : relacionadas.length})
             </button>
           </div>
     
@@ -1922,6 +2224,156 @@
             );
           })()}
     
+          {/* ── Documentos Tab ── */}
+          {tab === "documentos" && (() => {
+            // Group related docs by type
+            const grouped = {};
+            relacionadas.forEach((r) => {
+              const tipo = r.siglaTipo || "OUTRO";
+              if (!grouped[tipo]) grouped[tipo] = [];
+              grouped[tipo].push(r);
+            });
+            const tipoOrder = ["SBT", "EMC", "EMP", "EMD", "EMS", "ESB", "PAR", "VTS", "REQ", "REC", "DTQ", "RPD", "ERD"];
+            const sortedTypes = Object.keys(grouped).sort((a, b) => {
+              const ia = tipoOrder.indexOf(a);
+              const ib = tipoOrder.indexOf(b);
+              return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+            });
+    
+            return (
+              <div>
+                {relLoading && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    <Skeleton height={60} />
+                    <Skeleton height={60} />
+                    <Skeleton height={60} />
+                  </div>
+                )}
+    
+                {!relLoading && relacionadas.length === 0 && (
+                  <p style={{ textAlign: "center", color: dark ? "#6b7280" : "#9ca3af", fontSize: 13, padding: "30px 0" }}>
+                    Nenhum documento acessório encontrado para esta proposição.
+                  </p>
+                )}
+    
+                {!relLoading && relacionadas.length > 0 && (
+                  <div style={{
+                    padding: "14px 18px",
+                    borderRadius: 10,
+                    background: dark ? "rgba(37,99,235,0.06)" : "rgba(37,99,235,0.03)",
+                    border: `1px solid ${dark ? "rgba(37,99,235,0.15)" : "rgba(37,99,235,0.08)"}`,
+                    marginBottom: 20,
+                  }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#2563eb", marginBottom: 4 }}>
+                      {relacionadas.length} documento(s) acessório(s)
+                    </div>
+                    <p style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", margin: 0 }}>
+                      Emendas, requerimentos, recursos, destaques e outros documentos vinculados a {project.siglaTipo} {project.numero}/{project.ano}.
+                      A interpretação de cada documento é baseada no Regimento Interno da Câmara dos Deputados.
+                    </p>
+                  </div>
+                )}
+    
+                {sortedTypes.map((tipo) => {
+                  const docs = grouped[tipo];
+                  const tipoRef = REGIMENTO_INTERNO.documentosAcessorios[tipo] || null;
+                  const label = TIPO_ACESSORIO_LABELS[tipo] || tipo;
+                  const borderColor = tipo === "REC" ? "#dc2626" : tipo === "DTQ" ? "#ea580c" : tipo.startsWith("EM") || tipo === "SBT" || tipo === "ESB" ? "#2563eb" : tipo === "REQ" ? "#007A37" : (dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.1)");
+    
+                  return (
+                    <div key={tipo} style={{ marginBottom: 24 }}>
+                      {/* Type header with Regimento context */}
+                      <div style={{
+                        padding: "14px 18px",
+                        borderRadius: "10px 10px 0 0",
+                        background: dark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.02)",
+                        borderLeft: `4px solid ${borderColor}`,
+                        border: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+                        borderBottom: "none",
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                          <div style={{ fontWeight: 800, fontSize: 14, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                            {label} ({docs.length})
+                          </div>
+                          {tipoRef && (
+                            <Badge label={tipoRef.artigos} color="#007A37" bg={dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.08)"} small />
+                          )}
+                        </div>
+                        {tipoRef && (
+                          <div>
+                            <p style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", margin: "0 0 6px", lineHeight: 1.5 }}>
+                              {tipoRef.descricao}
+                            </p>
+                            <div style={{
+                              padding: "8px 10px",
+                              borderRadius: 6,
+                              background: dark ? "rgba(234,88,12,0.06)" : "rgba(234,88,12,0.03)",
+                              border: `1px solid ${dark ? "rgba(234,88,12,0.1)" : "rgba(234,88,12,0.06)"}`,
+                            }}>
+                              <div style={{ fontSize: 10, fontWeight: 700, color: "#ea580c", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 2 }}>
+                                Interpretação no Contexto deste Projeto
+                              </div>
+                              <p style={{ fontSize: 11, color: dark ? "#d1d5db" : "#374151", margin: 0, lineHeight: 1.5 }}>
+                                {tipoRef.interpretacao}
+                              </p>
+                            </div>
+                            {tipoRef.subtipos && (
+                              <div style={{ marginTop: 8 }}>
+                                <div style={{ fontSize: 10, fontWeight: 700, color: dark ? "#6b7280" : "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 4 }}>
+                                  Subtipos
+                                </div>
+                                {Object.entries(tipoRef.subtipos).map(([nome, desc]) => (
+                                  <div key={nome} style={{ fontSize: 10, color: dark ? "#9ca3af" : "#6b7280", lineHeight: 1.4, marginBottom: 2 }}>
+                                    <strong>{nome}:</strong> {desc}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+    
+                      {/* Individual documents */}
+                      {docs.map((doc, i) => (
+                        <div
+                          key={doc.id || i}
+                          style={{
+                            padding: "12px 18px",
+                            background: dark ? "rgba(255,255,255,0.02)" : "#fff",
+                            border: `1px solid ${dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)"}`,
+                            borderTop: "none",
+                            borderLeft: `4px solid ${borderColor}`,
+                            borderRadius: i === docs.length - 1 ? "0 0 10px 10px" : 0,
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                            <span style={{ fontWeight: 700, fontSize: 12, color: dark ? "#e5e7eb" : "#111827" }}>
+                              {doc.siglaTipo} {doc.numero}/{doc.ano}
+                            </span>
+                            {doc.id && !DEMO_MODE && (
+                              <a
+                                href={`https://www.camara.leg.br/proposicoesWeb/fichadetramitacao?idProposicao=${doc.id}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                style={{ color: "#007A37", fontSize: 10, fontWeight: 700, textDecoration: "none", display: "flex", alignItems: "center", gap: 3 }}
+                              >
+                                <Icons.External /> Ver
+                              </a>
+                            )}
+                          </div>
+                          <p style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", margin: 0, lineHeight: 1.5 }}>
+                            {doc.ementa || "Sem ementa disponível"}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+    
           {/* Timeline */}
           {tab === "tramitacoes" && (
             <div style={{ position: "relative", paddingLeft: 28 }}>
@@ -2128,6 +2580,27 @@
         });
         addToast(`${full.siglaTipo || ""} ${full.numero || ""}/${full.ano || ""} adicionado ao monitoramento`);
       }, [addToast]);
+    
+      // Add multiple projects at once
+      const addMultipleProjects = useCallback(async (items) => {
+        const toAdd = [];
+        for (const item of items) {
+          let full = item;
+          if (!item.statusProposicao) {
+            try {
+              full = await getProposicao(item.id);
+            } catch {
+              full = item;
+            }
+          }
+          toAdd.push(full);
+        }
+        setProjects((prev) => {
+          const existingIds = new Set(prev.map((p) => p.id));
+          const newOnes = toAdd.filter((p) => !existingIds.has(p.id));
+          return [...newOnes, ...prev];
+        });
+      }, []);
     
       // Remove project
       const removeProject = useCallback((id) => {
@@ -2597,6 +3070,7 @@
               <SearchModal
                 onClose={() => setShowSearch(false)}
                 onAdd={(item) => { addProject(item); setShowSearch(false); }}
+                onAddMultiple={(items) => { addMultipleProjects(items); }}
                 monitoredIds={monitoredIds}
                 addToast={addToast}
               />
