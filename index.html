@@ -236,7 +236,7 @@
         return { dados, links: [] };
       }
       const params = {
-        ordem: "DESC", ordenarPor: "id", itens: 100, pagina,
+        ordem: "DESC", ordenarPor: "id", itens: 500, pagina,
       };
       if (role === "autor") params.idDeputadoAutor = deputadoId;
       else params.idDeputadoAutor = deputadoId;
@@ -561,6 +561,23 @@
           interpretacao: "Votos em separado sinalizam divisão dentro da comissão. Se muitos, indicam que o parecer do relator não tem consenso.",
         },
       },
+      areasTematicas: {
+        "Economia e Tributação": ["CFT", "CDEICS", "CME", "CAPADR"],
+        "Direito e Justiça": ["CCJC", "CDC", "CSPCCO"],
+        "Saúde e Previdência": ["CSSF"],
+        "Educação e Cultura": ["CE", "CCULT"],
+        "Trabalho e Serviço Público": ["CTD", "CTASP"],
+        "Ciência e Tecnologia": ["CCTCI"],
+        "Defesa e Segurança": ["CREDN", "CSPCCO"],
+        "Meio Ambiente": ["CMADS"],
+        "Infraestrutura e Transportes": ["CVT", "CDU", "CINDRA"],
+        "Administração Pública": ["CTASP", "MESA"],
+        "Direitos Humanos": ["CDHM"],
+        "Política e Eleições": ["CCJC"],
+        "Agricultura e Pecuária": ["CAPADR"],
+        "Relações Exteriores": ["CREDN"],
+        "Minas e Energia": ["CME"],
+      },
       situacoes: {
         "Aguardando Deliberação": "A proposição está na Ordem do Dia, pronta para ser votada quando for incluída na pauta.",
         "Pronta para Pauta": "O parecer foi aprovado nas comissões e a matéria está pronta para inclusão na Ordem do Dia.",
@@ -605,7 +622,8 @@
     }
     
     // ─── Strategic Recommendation Engine ────────────────────────────────────
-    // Suggests the best procedural measure to accelerate a project based on RICD
+    // Deep analysis based on the Regimento Interno da Câmara dos Deputados (RICD)
+    // Proposes next strategic steps based on the latest movement/dispatch
     function getStrategicRecommendation(project, tramitacoes) {
       const status = project.statusProposicao || {};
       const regime = (status.regime || "").toLowerCase();
@@ -613,123 +631,343 @@
       const orgao = (status.siglaOrgao || "").toUpperCase();
       const tipo = (project.siglaTipo || "").toUpperCase();
       const stage = inferStage(status, tramitacoes);
-    
+      const apreciacao = (status.apreciacao || "").toLowerCase();
+
+      // Analyze last tramitação for context
+      const lastTram = tramitacoes && tramitacoes.length > 0 ? tramitacoes[0] : null;
+      const lastDesc = lastTram ? (lastTram.descricaoTramitacao || "").toLowerCase() : "";
+      const lastSit = lastTram ? (lastTram.descricaoSituacao || "").toLowerCase() : "";
+
+      // Calculate time since last movement (days)
+      const daysSinceLastMovement = lastTram && lastTram.dataHora
+        ? Math.floor((Date.now() - new Date(lastTram.dataHora).getTime()) / (1000 * 60 * 60 * 24))
+        : null;
+
       const recommendations = [];
-    
-      // If not yet in urgency, suggest requesting it
-      if (!regime.includes("urgência") && !regime.includes("urgencia") && tipo !== "PEC") {
+
+      // ── 1. ANÁLISE BASEADA NO ÚLTIMO DESPACHO/ANDAMENTO ──
+
+      // 1.1 Projeto recém-apresentado
+      if (lastSit.includes("apresenta") || stage === "apresentacao") {
         recommendations.push({
           prioridade: 1,
-          acao: "Requerer Urgência",
-          base: "Art. 153 e 154 RICD",
-          descricao: "Apresentar requerimento de urgência assinado por maioria absoluta dos Deputados ou líderes que representem esse número. Dispensa interstícios e inclui a matéria imediatamente na Ordem do Dia.",
+          acao: "Requerer despacho inicial da Mesa",
+          base: "Art. 137 e 139 RICD",
+          descricao: "A proposição foi apresentada e aguarda despacho da Mesa Diretora para distribuição às comissões. O autor pode requerer ao Presidente que apresse o despacho, especialmente se o prazo de 2 sessões já foi ultrapassado (Art. 137, §1º). Verificar se o projeto deve ser distribuído a mais de 3 comissões, caso em que será criada comissão especial (Art. 34, II).",
+          impacto: "alto",
+        });
+      }
+
+      // 1.2 Despacho feito — distribuído às comissões
+      if (lastSit.includes("despacho") || (stage === "despacho" && lastDesc.includes("comiss"))) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Verificar distribuição e requerer redistribuição se necessário",
+          base: "Art. 139, 141 e 34, II RICD",
+          descricao: "O projeto foi despachado às comissões. Verificar: (1) se todas as comissões competentes foram incluídas; (2) se a distribuição a mais de 3 comissões não exige criação de comissão especial; (3) se a competência está correta. Se houver erro, requerer redistribuição (Art. 141, §2º). Se o despacho for a comissões com poder conclusivo, verificar se isso favorece ou prejudica.",
           impacto: "alto",
         });
         recommendations.push({
           prioridade: 2,
-          acao: "Requerer Urgência Urgentíssima",
-          base: "Art. 155 RICD",
-          descricao: "Se aprovado por 2/3 dos membros da Casa ou líderes que representem esse número, permite incluir a matéria na Ordem do Dia para discussão e votação imediata.",
+          acao: "Solicitar designação célere de relator",
+          base: "Art. 39, I e 41 RICD",
+          descricao: "O presidente de cada comissão designa o relator. Articular com o presidente para designação na próxima reunião. O relator terá 10 sessões (ordinário), 5 sessões (prioridade/urgência) para apresentar parecer (Art. 52).",
+          impacto: "alto",
+        });
+      }
+
+      // 1.3 Aguardando designação de relator
+      if (sit.includes("designação de relator") || sit.includes("designacao de relator") || lastSit.includes("designação") || lastSit.includes("designacao")) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Articular com Presidente da Comissão para designação imediata",
+          base: "Art. 39, I e 41 RICD",
+          descricao: "A comissão recebeu a matéria mas o relator não foi designado. O Presidente da Comissão deve designar relator (Art. 39, I). Articular para que um deputado favorável ao projeto seja indicado como relator. Se houver demora injustificada, levar ao Presidente da Câmara.",
+          impacto: "alto",
+        });
+        if (daysSinceLastMovement && daysSinceLastMovement > 30) {
+          recommendations.push({
+            prioridade: 1,
+            acao: "Cobrar andamento — projeto parado há " + daysSinceLastMovement + " dias",
+            base: "Art. 52, §6º RICD",
+            descricao: "A matéria está sem movimentação há mais de 30 dias. Os autores ou líderes podem solicitar providências ao Presidente da Comissão. Se a inação persistir, requerer urgência para destravar (Art. 153 RICD).",
+            impacto: "muito alto",
+          });
+        }
+      }
+
+      // 1.4 Relator designado — aguardando parecer
+      if (sit.includes("aguardando parecer") || (lastDesc.includes("designad") && lastDesc.includes("relator"))) {
+        const prazoRelator = regime.includes("urgência") || regime.includes("urgencia") || regime.includes("prioridade") ? 5 : 10;
+        recommendations.push({
+          prioridade: 1,
+          acao: "Monitorar prazo do Relator (" + prazoRelator + " sessões)",
+          base: "Art. 52 RICD",
+          descricao: `O relator tem prazo de ${prazoRelator} sessões para apresentar parecer. Esgotado o prazo sem apresentação, qualquer membro pode requerer novo relator (Art. 52, §3º). O relator pode pedir prorrogação por metade do período (Art. 52, §1º). Articular diretamente com o relator oferecendo subsídios técnicos.`,
+          impacto: "alto",
+        });
+        if (daysSinceLastMovement && daysSinceLastMovement > 20) {
+          recommendations.push({
+            prioridade: 1,
+            acao: "Requerer substituição do Relator por estouro de prazo",
+            base: "Art. 52, §3º RICD",
+            descricao: "O prazo do relator já deve ter sido ultrapassado (projeto sem movimentação há " + daysSinceLastMovement + " dias). Qualquer membro da comissão pode requerer designação de novo relator ao Presidente da Comissão.",
+            impacto: "muito alto",
+          });
+        }
+      }
+
+      // 1.5 Parecer apresentado/aprovado
+      if (sit.includes("parecer") || lastSit.includes("parecer")) {
+        if (sit.includes("parecer aprovado") || lastDesc.includes("parecer aprovado") || lastDesc.includes("aprovação do parecer")) {
+          if (apreciacao.includes("conclusivo")) {
+            recommendations.push({
+              prioridade: 1,
+              acao: "Monitorar prazo de recurso ao Plenário (5 sessões)",
+              base: "Art. 132, §2º RICD",
+              descricao: "Com parecer aprovado em regime conclusivo, a matéria será considerada aprovada se não houver recurso de 1/10 dos membros (52 deputados) em 5 sessões. Se o objetivo é acelerar, evitar controvérsias. Se quer levar ao Plenário, articular 52 assinaturas.",
+              impacto: "alto",
+            });
+          } else {
+            recommendations.push({
+              prioridade: 1,
+              acao: "Requerer inclusão na Ordem do Dia do Plenário",
+              base: "Art. 17, I, s e Art. 83 RICD",
+              descricao: "Parecer aprovado na(s) comissão(ões). Solicitar ao Presidente e ao Colégio de Líderes (Art. 20) a inclusão na pauta da próxima sessão deliberativa. Em regime de urgência, a inclusão é automática (Art. 152, §2º).",
+              impacto: "alto",
+            });
+          }
+        } else {
+          recommendations.push({
+            prioridade: 1,
+            acao: "Requerer votação do parecer na Comissão",
+            base: "Art. 47, §2º RICD",
+            descricao: "O relator apresentou parecer que ainda não foi votado pela comissão. Solicitar inclusão na pauta da próxima reunião deliberativa. O parecer deve ser publicado 2 sessões antes da votação (Art. 130, §2º), salvo urgência.",
+            impacto: "alto",
+          });
+        }
+      }
+
+      // 1.6 Pronta para pauta / Ordem do Dia
+      if (sit.includes("pronta para pauta") || sit.includes("ordem do dia") || lastSit.includes("pronta para pauta")) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Articular com Colégio de Líderes para inclusão na pauta",
+          base: "Art. 17, I, s e Art. 20 RICD",
+          descricao: "A matéria está pronta mas depende de inclusão na Ordem do Dia pelo Presidente, ouvido o Colégio de Líderes. Articular com líderes partidários. Se já na Ordem do Dia, verificar risco de adiamento (Art. 177).",
+          impacto: "alto",
+        });
+        recommendations.push({
+          prioridade: 2,
+          acao: "Requerer preferência na votação",
+          base: "Art. 159 e 160 RICD",
+          descricao: "Se na Ordem do Dia com muitas matérias à frente, requerer preferência (Art. 159) ou inversão de pauta (Art. 160). Requer aprovação do Plenário por maioria simples.",
+          impacto: "médio",
+        });
+        if (daysSinceLastMovement && daysSinceLastMovement > 60) {
+          recommendations.push({
+            prioridade: 1,
+            acao: "Requerer urgência para destravar votação parada há " + daysSinceLastMovement + " dias",
+            base: "Art. 153 e 154 RICD",
+            descricao: "A matéria está pronta para votação mas não é incluída na pauta há mais de 60 dias. Requerer urgência para forçar inclusão na Ordem do Dia automaticamente.",
+            impacto: "muito alto",
+          });
+        }
+      }
+
+      // 1.7 Aguardando deliberação em Plenário
+      if (sit.includes("deliberaç") || sit.includes("deliberac") || (orgao === "PLEN" && stage === "votacao")) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Preparar estratégia de votação em Plenário",
+          base: "Art. 184 a 188 RICD",
+          descricao: "A matéria será votada em Plenário. Ações: (1) articular base de apoio para quórum; (2) coordenar posição sobre emendas de plenário (Art. 120); (3) preparar contra obstrução, verificação de votação (Art. 185), votação nominal (Art. 186); (4) defender dispositivos destacados (Art. 161); (5) atentar para requerimento de adiamento (Art. 177, §2º).",
+          impacto: "alto",
+        });
+      }
+
+      // ── 2. ANÁLISE POR TIPO DE PROPOSIÇÃO ──
+
+      if (tipo === "PEC") {
+        if (sit.includes("admissibilidade") || orgao === "CCJC") {
+          recommendations.push({
+            prioridade: 1,
+            acao: "Acompanhar admissibilidade na CCJC (prazo de 5 sessões)",
+            base: "Art. 202, caput RICD",
+            descricao: "A CCJC deve se pronunciar sobre admissibilidade em 5 sessões. Verificar: (1) cláusulas pétreas (Art. 60, §4º CF); (2) limitações circunstanciais; (3) requisitos formais (1/3 de assinaturas). Se inadmitida, cabe recurso ao Plenário por 1/10 dos membros.",
+            impacto: "muito alto",
+          });
+        }
+        if (lastDesc.includes("admitida") || lastDesc.includes("comissão especial") || lastSit.includes("comissão especial")) {
+          recommendations.push({
+            prioridade: 1,
+            acao: "Monitorar Comissão Especial (prazo de 40 sessões)",
+            base: "Art. 202, §2º a §4º RICD",
+            descricao: "Após admissão, Comissão Especial examina o mérito (40 sessões). Ações: (1) articular membros e relator favorável; (2) requerer audiências públicas para construir consenso; (3) esgotado prazo sem parecer, Presidente pode dar 10 sessões improrrogáveis (Art. 52, §6º).",
+            impacto: "alto",
+          });
+        }
+        if (stage === "votacao" || sit.includes("deliberaç") || sit.includes("deliberac")) {
+          recommendations.push({
+            prioridade: 1,
+            acao: "Garantir quórum de 3/5 em dois turnos",
+            base: "Art. 60, §2º CF e Art. 202, §6º e §7º RICD",
+            descricao: "PEC exige 3/5 (308 votos) em dois turnos, interstício mínimo de 5 sessões, votação nominal. Mapear 308 votos favoráveis. No 2º turno, emendas supressivas são admitidas.",
+            impacto: "muito alto",
+          });
+        }
+      }
+
+      if (tipo === "PLP" && (stage === "votacao" || sit.includes("deliberaç") || sit.includes("deliberac"))) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Garantir maioria absoluta (257 votos)",
+          base: "Art. 69 CF e Art. 183, §3º RICD",
+          descricao: "PLP exige maioria absoluta (257 votos a favor). Votação nominal. PLP não admite poder conclusivo das comissões (Art. 24, II). Articular presença e orientação de bancada.",
           impacto: "muito alto",
         });
       }
-    
-      // Stage-specific recommendations
-      if (stage === "apresentacao" || stage === "despacho") {
-        recommendations.push({
-          prioridade: 3,
-          acao: "Acompanhar distribuição às Comissões",
-          base: "Art. 139 RICD",
-          descricao: "Verificar se o despacho da Mesa distribuiu a matéria às comissões adequadas. Pode-se requerer redistribuição se houver erro (Art. 141).",
-          impacto: "médio",
-        });
-      }
-    
-      if (stage === "comissoes") {
-        if (sit.includes("relator")) {
-          recommendations.push({
-            prioridade: 1,
-            acao: "Solicitar celeridade ao Relator",
-            base: "Art. 52 RICD",
-            descricao: "O relator tem prazo de 10 sessões (ordinário) ou 5 sessões (urgência/prioridade) para apresentar parecer. Esgotado o prazo, pode-se requerer a designação de novo relator.",
-            impacto: "alto",
-          });
-        }
-        if (sit.includes("parecer")) {
-          recommendations.push({
-            prioridade: 1,
-            acao: "Requerer inclusão na pauta da Comissão",
-            base: "Art. 47 RICD",
-            descricao: "Solicitar ao Presidente da Comissão a inclusão imediata da matéria na pauta de reunião para votação do parecer.",
-            impacto: "alto",
-          });
-        }
-        recommendations.push({
-          prioridade: 4,
-          acao: "Requerer audiência pública",
-          base: "Art. 255 a 258 RICD",
-          descricao: "Audiência pública pode dar visibilidade e pressão política para a tramitação, embora possa adicionar tempo ao processo.",
-          impacto: "médio",
-        });
-      }
-    
-      if (stage === "plenario" || sit.includes("pronta para pauta") || sit.includes("ordem do dia")) {
+
+      if (tipo === "MPV") {
         recommendations.push({
           prioridade: 1,
-          acao: "Solicitar inclusão na Ordem do Dia",
-          base: "Art. 17, I, s RICD",
-          descricao: "Solicitar ao Presidente da Câmara a inclusão da matéria na Ordem do Dia. Em regime de urgência, a inclusão é automática.",
-          impacto: "alto",
-        });
-        recommendations.push({
-          prioridade: 3,
-          acao: "Requerer preferência na votação",
-          base: "Art. 160 RICD",
-          descricao: "Requerimento para que a matéria seja discutida e votada antes das demais da Ordem do Dia.",
-          impacto: "médio",
+          acao: "Monitorar prazo constitucional de 60+60 dias",
+          base: "Art. 62, §§3º a 7º CF",
+          descricao: "MPV tem prazo de 60 dias prorrogáveis por mais 60. Se não votada em 45 dias, tranca a pauta. Acompanhar Comissão Mista. Se perder eficácia, o Congresso disciplina relações jurídicas por decreto legislativo em 60 dias.",
+          impacto: "muito alto",
         });
       }
-    
-      if (sit.includes("conjunto") || sit.includes("apensad")) {
+
+      if (tipo === "PDL" && (lastDesc.includes("sustação") || lastDesc.includes("susta"))) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Articular votação de sustação antes da consolidação do ato",
+          base: "Art. 49, V CF",
+          descricao: "PDL de sustação só tem eficácia após aprovação. Quanto mais tempo o decreto vigorar, mais difícil será a sustação política. Articular votação célere. Efeito ex nunc (não retroativo).",
+          impacto: "alto",
+        });
+      }
+
+      // ── 3. REGIME DE TRAMITAÇÃO ──
+
+      if (!regime.includes("urgência") && !regime.includes("urgencia") && tipo !== "PEC" && tipo !== "MPV" && stage !== "sancao" && stage !== "revisao") {
         recommendations.push({
           prioridade: 2,
-          acao: "Verificar proposição principal",
+          acao: "Requerer Urgência para acelerar tramitação",
+          base: "Art. 153 e 154 RICD",
+          descricao: "Requerer urgência por maioria absoluta (257) ou líderes. Efeitos: dispensa interstícios, inclusão automática na Ordem do Dia, parecer em Plenário (Art. 154, II), prazo de emendas de 2 horas (Art. 120, §4º). Urgência urgentíssima (Art. 155) com 2/3 permite votação imediata.",
+          impacto: "alto",
+        });
+      }
+
+      // ── 4. SITUAÇÕES ESPECIAIS ──
+
+      if (sit.includes("conjunto") || sit.includes("apensad") || lastDesc.includes("apens")) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Avaliar apensação — verificar projeto principal ou requerer desapensação",
           base: "Art. 142 e 143 RICD",
-          descricao: "Quando proposições tramitam em conjunto, o andamento depende da proposição principal (mais antiga). Acompanhar a tramitação da principal para prever o andamento.",
-          impacto: "médio",
-        });
-        recommendations.push({
-          prioridade: 3,
-          acao: "Requerer desapensação",
-          base: "Art. 142, §1º RICD",
-          descricao: "Se as proposições não são semelhantes ou se a apensação prejudica a tramitação, pode-se requerer a desapensação.",
-          impacto: "médio",
-        });
-      }
-    
-      // PEC-specific
-      if (tipo === "PEC") {
-        if (stage === "comissoes" || sit.includes("admissibilidade")) {
-          recommendations.push({
-            prioridade: 1,
-            acao: "Acompanhar admissibilidade na CCJC",
-            base: "Art. 202 RICD",
-            descricao: "PEC precisa ser admitida pela CCJC antes de ir à Comissão Especial. Prazo de 5 sessões para o relator na CCJC.",
-            impacto: "alto",
-          });
-        }
-        recommendations.push({
-          prioridade: 2,
-          acao: "Monitorar Comissão Especial",
-          base: "Art. 202, §2º RICD",
-          descricao: "Após admissibilidade, deve ser criada Comissão Especial com prazo de 40 sessões para proferir parecer.",
+          descricao: "O projeto tramita apensado a outro. O andamento depende da proposição principal (mais antiga). Se a apensação prejudica (projeto principal abandonado, relator contrário), requerer desapensação (Art. 142, §1º). Se a principal é favorável, a apensação pode acelerar.",
           impacto: "alto",
         });
       }
-    
-      // Sort by priority
+
+      if (lastDesc.includes("audiência pública") || lastDesc.includes("audiencia publica")) {
+        recommendations.push({
+          prioridade: 2,
+          acao: "Participar da audiência pública e indicar especialistas favoráveis",
+          base: "Art. 255 a 258 RICD",
+          descricao: "Audiência pública sobre esta matéria. Indicar especialistas favoráveis. Cada bloco pode indicar convidados. Oportunidade de construir consenso e pressionar pela aprovação.",
+          impacto: "médio",
+        });
+      }
+
+      if (lastDesc.includes("substitutivo") || lastDesc.includes("emenda")) {
+        recommendations.push({
+          prioridade: 2,
+          acao: "Analisar alterações e avaliar estratégia de emendamento",
+          base: "Art. 118 a 125 RICD",
+          descricao: "Emendas ou substitutivo apresentados. Avaliar se alteram substancialmente o projeto. Apresentar emendas corretivas se necessário. Requerer destaque (Art. 161) para votar separadamente artigos controversos.",
+          impacto: "médio",
+        });
+      }
+
+      if (lastDesc.includes("recurso")) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Acompanhar recurso — pode alterar o foro de deliberação",
+          base: "Art. 132, §2º e Art. 58, §2º, I CF",
+          descricao: "Recurso interposto, possivelmente contra poder conclusivo. Se tiver 52 assinaturas válidas, a matéria vai ao Plenário. Pode atrasar ou acelerar conforme o contexto político.",
+          impacto: "alto",
+        });
+      }
+
+      if (sit.includes("arquivad") || lastSit.includes("arquivad")) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Requerer desarquivamento",
+          base: "Art. 105 RICD",
+          descricao: "Proposição arquivada, provavelmente por fim de legislatura. Desarquivamento: pelo autor (180 dias do início da legislatura) ou 1/3 dos membros/líderes. Se arquivada por rejeição, reapresentação na mesma sessão exige maioria absoluta (Art. 67 CF).",
+          impacto: "muito alto",
+        });
+      }
+
+      if (sit.includes("senado") || sit.includes("revis") || stage === "revisao") {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Acompanhar tramitação no Senado (Casa Revisora)",
+          base: "Art. 65 CF",
+          descricao: "Aprovado pela Câmara, enviado ao Senado. Se aprovado sem alterações, vai à sanção. Se emendado, retorna à Câmara apenas para apreciar as emendas (Art. 65, parágrafo único). Se rejeitado, é arquivado. Articular com senadores para aprovação sem emendas.",
+          impacto: "alto",
+        });
+      }
+
+      if (sit.includes("veto") || lastDesc.includes("veto")) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Articular derrubada do veto no Congresso",
+          base: "Art. 66, §4º CF",
+          descricao: "O Presidente vetou o projeto. Derrubada exige maioria absoluta de cada Casa (257 deputados + 41 senadores) em sessão conjunta, dentro de 30 dias. Se não apreciado em 30 dias, tranca a pauta do Congresso.",
+          impacto: "muito alto",
+        });
+      } else if (sit.includes("sancion") || sit.includes("sanção")) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Acompanhar sanção e publicação no Diário Oficial",
+          base: "Art. 66, §§1º e 7º CF",
+          descricao: "Enviado à sanção presidencial. O Presidente tem 15 dias úteis para sancionar ou vetar. Articular com Governo pela sanção integral. Após sanção, acompanhar publicação e vacatio legis.",
+          impacto: "médio",
+        });
+      }
+
+      // ── 5. ALERTA DE INATIVIDADE ──
+      if (daysSinceLastMovement && daysSinceLastMovement > 90 && stage !== "sancao" && stage !== "revisao") {
+        recommendations.push({
+          prioridade: 1,
+          acao: "ALERTA: Projeto sem movimentação há " + daysSinceLastMovement + " dias",
+          base: "Art. 52, §6º e Art. 153 RICD",
+          descricao: "Parado há mais de 90 dias. Medidas emergenciais: requerer urgência (Art. 153), substituir relator por inação (Art. 52, §3º), solicitar providências ao Presidente (Art. 17, I). Atentar para risco de arquivamento por fim de legislatura (Art. 105).",
+          impacto: "muito alto",
+        });
+      } else if (daysSinceLastMovement && daysSinceLastMovement > 45 && stage !== "sancao" && stage !== "revisao" && !recommendations.some((r) => r.acao.includes("parado") || r.acao.includes("ALERTA"))) {
+        recommendations.push({
+          prioridade: 2,
+          acao: "Atenção: Projeto sem movimentação há " + daysSinceLastMovement + " dias",
+          base: "Art. 52, §§ RICD",
+          descricao: "Mais de 45 dias sem andamento. Verificar se há impedimento processual ou inação política. Articular com membros da comissão ou líderes para retomada.",
+          impacto: "alto",
+        });
+      }
+
+      // Sort by priority, deduplicate and return top 5
       recommendations.sort((a, b) => a.prioridade - b.prioridade);
-      return recommendations.slice(0, 3); // Return top 3
+      const seen = new Set();
+      const unique = recommendations.filter((r) => {
+        if (seen.has(r.acao)) return false;
+        seen.add(r.acao);
+        return true;
+      });
+      return unique.slice(0, 5);
     }
     
     // Describe current rite/procedure the project will follow
@@ -1310,7 +1548,63 @@
       return (
         <div style={{ position: "fixed", inset: 0, background: overlay, zIndex: 1000, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: 60 }} onClick={onClose}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: bg, borderRadius: 16, width: "92%", maxWidth: 640, maxHeight: "80vh", overflow: "hidden", boxShadow: "0 20px 60px rgba(0,0,0,0.3)", display: "flex", flexDirection: "column" }}>
-    
+
+            {/* Sticky top bar: Monitorar Todos */}
+            {mode === "deputado" && selectedDeputado && !depProjLoading && results.length > 0 && (() => {
+              const unmonitored = results.filter((r) => !monitoredIds.has(r.id));
+              const allMonitored = unmonitored.length === 0;
+              return (
+                <div style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "10px 24px",
+                  background: dark ? "rgba(0,122,55,0.12)" : "rgba(0,122,55,0.06)",
+                  borderBottom: `1px solid ${dark ? "rgba(0,122,55,0.2)" : "rgba(0,122,55,0.12)"}`,
+                  flexShrink: 0,
+                }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: dark ? "#e5e7eb" : "#111827" }}>
+                      {results.length} proposição(ões) encontrada(s)
+                    </div>
+                    <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
+                      {allMonitored ? "Todas já estão sendo monitoradas" : `${unmonitored.length} ainda não monitorada(s)`}
+                      {hasMore && " — carregue mais para ver todas"}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (allMonitored) return;
+                      const toAdd = unmonitored.map((r) => detailsCache[r.id] || r);
+                      onAddMultiple(toAdd);
+                      addToast(`${toAdd.length} proposição(ões) adicionada(s) ao monitoramento`);
+                    }}
+                    disabled={allMonitored}
+                    style={{
+                      padding: "8px 18px",
+                      borderRadius: 6,
+                      border: "none",
+                      background: allMonitored ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
+                      color: allMonitored ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
+                      fontWeight: 700,
+                      fontSize: 12,
+                      cursor: allMonitored ? "default" : "pointer",
+                      whiteSpace: "nowrap",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
+                    }}
+                  >
+                    {allMonitored ? (
+                      <><Icons.Check /> Todos monitorados</>
+                    ) : (
+                      <><Icons.Plus /> Monitorar Todos ({unmonitored.length})</>
+                    )}
+                  </button>
+                </div>
+              );
+            })()}
+
             {/* Mode Tabs */}
             <div style={{ display: "flex", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}` }}>
               <button style={modeTabStyle(mode === "proposicao")} onClick={() => setMode("proposicao")}>
@@ -1493,63 +1787,7 @@
                     </button>
                   </div>
     
-                  {/* Monitorar Todos button */}
-                  {!depProjLoading && results.length > 0 && (() => {
-                    const unmonitored = results.filter((r) => !monitoredIds.has(r.id));
-                    const allMonitored = unmonitored.length === 0;
-                    return (
-                      <div style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        padding: "10px 14px",
-                        borderRadius: 8,
-                        background: dark ? "rgba(0,122,55,0.08)" : "rgba(0,122,55,0.04)",
-                        border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.1)"}`,
-                        marginBottom: 14,
-                      }}>
-                        <div>
-                          <div style={{ fontSize: 12, fontWeight: 700, color: dark ? "#e5e7eb" : "#111827" }}>
-                            {results.length} proposição(ões) encontrada(s)
-                          </div>
-                          <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
-                            {allMonitored ? "Todas já estão sendo monitoradas" : `${unmonitored.length} ainda não monitorada(s)`}
-                            {hasMore && " — carregue mais para ver todas"}
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => {
-                            if (allMonitored) return;
-                            // Get the full details from cache when available
-                            const toAdd = unmonitored.map((r) => detailsCache[r.id] || r);
-                            onAddMultiple(toAdd);
-                            addToast(`${toAdd.length} proposição(ões) adicionada(s) ao monitoramento`);
-                          }}
-                          disabled={allMonitored}
-                          style={{
-                            padding: "8px 18px",
-                            borderRadius: 6,
-                            border: "none",
-                            background: allMonitored ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
-                            color: allMonitored ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
-                            fontWeight: 700,
-                            fontSize: 12,
-                            cursor: allMonitored ? "default" : "pointer",
-                            whiteSpace: "nowrap",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 4,
-                          }}
-                        >
-                          {allMonitored ? (
-                            <><Icons.Check /> Todos monitorados</>
-                          ) : (
-                            <><Icons.Plus /> Monitorar Todos ({unmonitored.length})</>
-                          )}
-                        </button>
-                      </div>
-                    );
-                  })()}
+                  {/* Monitorar Todos moved to sticky top bar */}
     
                   {depProjLoading && results.length === 0 && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1616,49 +1854,59 @@
                 );
               })}
     
-              {/* Load more for deputy mode */}
-              {mode === "deputado" && selectedDeputado && hasMore && !depProjLoading && results.length > 0 && (
-                <div style={{ textAlign: "center", padding: "12px 0", display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-                  <button
-                    onClick={() => loadDeputadoProposicoes(selectedDeputado, deputadoRole, depPage + 1)}
-                    style={{
-                      padding: "8px 24px",
-                      borderRadius: 8,
-                      border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
-                      background: "none",
-                      color: "#007A37",
-                      fontSize: 12,
-                      fontWeight: 700,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Carregar mais proposições...
-                  </button>
-                  <button
-                    onClick={loadAllProposicoes}
-                    disabled={loadingAll}
-                    style={{
-                      padding: "8px 24px",
-                      borderRadius: 8,
-                      border: "none",
-                      background: loadingAll ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
-                      color: loadingAll ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
-                      fontSize: 12,
-                      fontWeight: 700,
-                      cursor: loadingAll ? "default" : "pointer",
-                    }}
-                  >
-                    {loadingAll ? "Carregando todas..." : "Carregar Todas as Proposições"}
-                  </button>
-                </div>
-              )}
-    
               {depProjLoading && results.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
                   <CardSkeleton />
                 </div>
               )}
             </div>
+
+            {/* Sticky bottom bar: Carregar Mais */}
+            {mode === "deputado" && selectedDeputado && (hasMore || loadingAll) && !depProjLoading && results.length > 0 && (
+              <div style={{
+                display: "flex",
+                gap: 10,
+                justifyContent: "center",
+                flexWrap: "wrap",
+                padding: "10px 24px",
+                background: dark ? "rgba(15,15,26,0.95)" : "rgba(245,245,240,0.95)",
+                borderTop: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+                flexShrink: 0,
+              }}>
+                <button
+                  onClick={() => loadDeputadoProposicoes(selectedDeputado, deputadoRole, depPage + 1)}
+                  disabled={loadingAll}
+                  style={{
+                    padding: "8px 24px",
+                    borderRadius: 8,
+                    border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+                    background: "none",
+                    color: loadingAll ? (dark ? "#6b7280" : "#9ca3af") : "#007A37",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: loadingAll ? "default" : "pointer",
+                  }}
+                >
+                  Carregar mais proposições...
+                </button>
+                <button
+                  onClick={loadAllProposicoes}
+                  disabled={loadingAll}
+                  style={{
+                    padding: "8px 24px",
+                    borderRadius: 8,
+                    border: "none",
+                    background: loadingAll ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
+                    color: loadingAll ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: loadingAll ? "default" : "pointer",
+                  }}
+                >
+                  {loadingAll ? "Carregando todas..." : "Carregar Todas as Proposições"}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       );
@@ -1668,9 +1916,11 @@
     function FilterBar({ filters, setFilters, projects }) {
       const { dark } = useContext(AppContext);
       const [open, setOpen] = useState(false);
-    
+
       const tipos = [...new Set(projects.map((p) => p.siglaTipo))].sort();
       const anos = [...new Set(projects.map((p) => p.ano))].sort().reverse();
+      const comissoes = [...new Set(projects.map((p) => p.statusProposicao?.siglaOrgao).filter(Boolean))].sort();
+      const areas = Object.keys(REGIMENTO_INTERNO.areasTematicas).sort();
     
       const selectStyle = {
         padding: "6px 10px",
@@ -1709,6 +1959,17 @@
                 <option value="plenario">Plenário</option>
                 <option value="comissao">Comissão</option>
                 <option value="conclusivo">Conclusivo</option>
+              </select>
+              <select value={filters.comissao || ""} onChange={(e) => setFilters((f) => ({ ...f, comissao: e.target.value }))} style={selectStyle}>
+                <option value="">Todas as comissões</option>
+                {comissoes.map((c) => {
+                  const info = REGIMENTO_INTERNO.orgaos[c];
+                  return <option key={c} value={c}>{c}{info ? ` — ${info.nome}` : ""}</option>;
+                })}
+              </select>
+              <select value={filters.area || ""} onChange={(e) => setFilters((f) => ({ ...f, area: e.target.value }))} style={selectStyle}>
+                <option value="">Todas as áreas temáticas</option>
+                {areas.map((a) => <option key={a} value={a}>{a}</option>)}
               </select>
               <select value={filters.sort} onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value }))} style={selectStyle}>
                 <option value="recente">Andamento mais recente</option>
@@ -2537,7 +2798,7 @@
       const [showSettings, setShowSettings] = useState(false);
       const [toasts, setToasts] = useState([]);
       const [refreshing, setRefreshing] = useState(false);
-      const [filters, setFilters] = useState({ tipo: "", ano: "", regime: "", apreciacao: "", sort: "recente" });
+      const [filters, setFilters] = useState({ tipo: "", ano: "", regime: "", apreciacao: "", comissao: "", area: "", sort: "recente" });
       const [sidebarOpen, setSidebarOpen] = useState(false);
       const [lastTramitacoes, setLastTramitacoes] = useState({}); // { projectId: tramitacaoObj }
     
@@ -2750,6 +3011,13 @@
             if (filters.apreciacao === "conclusivo") return a.includes("conclusivo");
             return true;
           });
+        }
+        if (filters.comissao) {
+          list = list.filter((p) => (p.statusProposicao?.siglaOrgao || "") === filters.comissao);
+        }
+        if (filters.area) {
+          const comissoesArea = REGIMENTO_INTERNO.areasTematicas[filters.area] || [];
+          list = list.filter((p) => comissoesArea.includes(p.statusProposicao?.siglaOrgao || ""));
         }
         if (filters.sort === "recente") {
           // Sort by most recent tramitação first, then by urgency
