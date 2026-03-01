@@ -1225,7 +1225,7 @@
     }
     
     // ─── Project Card (Enhanced with realtime info) ────────────────────────
-    function ProjetoCard({ project, onSelect, onRemove, lastTramitacao }) {
+    function ProjetoCard({ project, onSelect, onRemove, lastTramitacao, selectMode, selected, onToggleSelect }) {
       const { dark } = useContext(AppContext);
       const status = project.statusProposicao || {};
       const regime = regimeBadge(status.regime);
@@ -1243,10 +1243,14 @@
           style={{
             padding: "18px 20px",
             borderRadius: 12,
-            background: dark ? "rgba(255,255,255,0.04)" : "#fff",
-            border: urgente
+            background: selected
+              ? (dark ? "rgba(220,38,38,0.08)" : "rgba(220,38,38,0.04)")
+              : (dark ? "rgba(255,255,255,0.04)" : "#fff"),
+            border: selected
               ? "2px solid #dc2626"
-              : `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"}`,
+              : urgente
+                ? "2px solid #dc2626"
+                : `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"}`,
             cursor: "pointer",
             transition: "all 0.2s",
             position: "relative",
@@ -1255,9 +1259,29 @@
           onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 6px 20px rgba(0,0,0,0.1)"; }}
           onMouseLeave={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = urgente ? "0 0 12px rgba(220,38,38,0.15)" : "0 1px 3px rgba(0,0,0,0.04)"; }}
         >
-          {urgente && (
+          {urgente && !selectMode && (
             <div style={{ position: "absolute", top: 8, right: 10, color: "#dc2626", animation: "pulse 2s infinite" }}>
               <Icons.Alert />
+            </div>
+          )}
+          {selectMode && (
+            <div
+              onClick={(e) => { e.stopPropagation(); onToggleSelect(project.id); }}
+              style={{ position: "absolute", top: 10, right: 10, cursor: "pointer" }}
+            >
+              <div style={{
+                width: 22,
+                height: 22,
+                borderRadius: 4,
+                border: selected ? "2px solid #dc2626" : `2px solid ${dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.2)"}`,
+                background: selected ? "#dc2626" : "transparent",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transition: "all 0.15s",
+              }}>
+                {selected && <Icons.Check />}
+              </div>
             </div>
           )}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
@@ -1545,65 +1569,15 @@
         transition: "all 0.15s",
       });
     
+      // Computed values for sticky bars
+      const unmonitored = results.filter((r) => !monitoredIds.has(r.id));
+      const allMonitored = results.length > 0 && unmonitored.length === 0;
+      const showMonitorBar = mode === "deputado" && selectedDeputado && results.length > 0;
+      const showLoadMoreBar = mode === "deputado" && selectedDeputado && (hasMore || loadingAll) && results.length > 0;
+
       return (
         <div style={{ position: "fixed", inset: 0, background: overlay, zIndex: 1000, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: 60 }} onClick={onClose}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: bg, borderRadius: 16, width: "92%", maxWidth: 640, maxHeight: "80vh", overflow: "hidden", boxShadow: "0 20px 60px rgba(0,0,0,0.3)", display: "flex", flexDirection: "column" }}>
-
-            {/* Sticky top bar: Monitorar Todos */}
-            {mode === "deputado" && selectedDeputado && !depProjLoading && results.length > 0 && (() => {
-              const unmonitored = results.filter((r) => !monitoredIds.has(r.id));
-              const allMonitored = unmonitored.length === 0;
-              return (
-                <div style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "10px 24px",
-                  background: dark ? "rgba(0,122,55,0.12)" : "rgba(0,122,55,0.06)",
-                  borderBottom: `1px solid ${dark ? "rgba(0,122,55,0.2)" : "rgba(0,122,55,0.12)"}`,
-                  flexShrink: 0,
-                }}>
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: dark ? "#e5e7eb" : "#111827" }}>
-                      {results.length} proposição(ões) encontrada(s)
-                    </div>
-                    <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
-                      {allMonitored ? "Todas já estão sendo monitoradas" : `${unmonitored.length} ainda não monitorada(s)`}
-                      {hasMore && " — carregue mais para ver todas"}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => {
-                      if (allMonitored) return;
-                      const toAdd = unmonitored.map((r) => detailsCache[r.id] || r);
-                      onAddMultiple(toAdd);
-                      addToast(`${toAdd.length} proposição(ões) adicionada(s) ao monitoramento`);
-                    }}
-                    disabled={allMonitored}
-                    style={{
-                      padding: "8px 18px",
-                      borderRadius: 6,
-                      border: "none",
-                      background: allMonitored ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
-                      color: allMonitored ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
-                      fontWeight: 700,
-                      fontSize: 12,
-                      cursor: allMonitored ? "default" : "pointer",
-                      whiteSpace: "nowrap",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 4,
-                    }}
-                  >
-                    {allMonitored ? (
-                      <><Icons.Check /> Todos monitorados</>
-                    ) : (
-                      <><Icons.Plus /> Monitorar Todos ({unmonitored.length})</>
-                    )}
-                  </button>
-                </div>
-              );
-            })()}
 
             {/* Mode Tabs */}
             <div style={{ display: "flex", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}` }}>
@@ -1673,6 +1647,59 @@
               </p>
             </div>
     
+            {/* Sticky bar: Monitorar Todos — always visible between search and results */}
+            {showMonitorBar && (
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "8px 24px",
+                background: dark ? "rgba(0,122,55,0.12)" : "rgba(0,122,55,0.06)",
+                borderBottom: `1px solid ${dark ? "rgba(0,122,55,0.2)" : "rgba(0,122,55,0.12)"}`,
+                flexShrink: 0,
+              }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: dark ? "#e5e7eb" : "#111827" }}>
+                    {results.length} proposição(ões){depProjLoading ? " (carregando...)" : ""}
+                  </div>
+                  <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
+                    {allMonitored ? "Todas já monitoradas" : `${unmonitored.length} não monitorada(s)`}
+                    {hasMore && !loadingAll && " — mais disponíveis"}
+                    {loadingAll && " — carregando todas..."}
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    if (allMonitored) return;
+                    const toAdd = unmonitored.map((r) => detailsCache[r.id] || r);
+                    onAddMultiple(toAdd);
+                    addToast(`${toAdd.length} proposição(ões) adicionada(s) ao monitoramento`);
+                  }}
+                  disabled={allMonitored}
+                  style={{
+                    padding: "8px 18px",
+                    borderRadius: 6,
+                    border: "none",
+                    background: allMonitored ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
+                    color: allMonitored ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
+                    fontWeight: 700,
+                    fontSize: 12,
+                    cursor: allMonitored ? "default" : "pointer",
+                    whiteSpace: "nowrap",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  {allMonitored ? (
+                    <><Icons.Check /> Todos monitorados</>
+                  ) : (
+                    <><Icons.Plus /> Monitorar Todos ({unmonitored.length})</>
+                  )}
+                </button>
+              </div>
+            )}
+
             {/* Scrollable Results */}
             <div style={{ flex: 1, overflow: "auto", padding: "16px 24px 24px" }}>
     
@@ -1787,8 +1814,8 @@
                     </button>
                   </div>
     
-                  {/* Monitorar Todos moved to sticky top bar */}
     
+
                   {depProjLoading && results.length === 0 && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                       <CardSkeleton /><CardSkeleton /><CardSkeleton />
@@ -1862,45 +1889,45 @@
             </div>
 
             {/* Sticky bottom bar: Carregar Mais */}
-            {mode === "deputado" && selectedDeputado && (hasMore || loadingAll) && !depProjLoading && results.length > 0 && (
+            {showLoadMoreBar && (
               <div style={{
                 display: "flex",
                 gap: 10,
                 justifyContent: "center",
                 flexWrap: "wrap",
                 padding: "10px 24px",
-                background: dark ? "rgba(15,15,26,0.95)" : "rgba(245,245,240,0.95)",
+                background: bg,
                 borderTop: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
                 flexShrink: 0,
               }}>
                 <button
                   onClick={() => loadDeputadoProposicoes(selectedDeputado, deputadoRole, depPage + 1)}
-                  disabled={loadingAll}
+                  disabled={loadingAll || depProjLoading}
                   style={{
                     padding: "8px 24px",
                     borderRadius: 8,
                     border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
                     background: "none",
-                    color: loadingAll ? (dark ? "#6b7280" : "#9ca3af") : "#007A37",
+                    color: (loadingAll || depProjLoading) ? (dark ? "#6b7280" : "#9ca3af") : "#007A37",
                     fontSize: 12,
                     fontWeight: 700,
-                    cursor: loadingAll ? "default" : "pointer",
+                    cursor: (loadingAll || depProjLoading) ? "default" : "pointer",
                   }}
                 >
-                  Carregar mais proposições...
+                  {depProjLoading ? "Carregando..." : "Carregar mais proposições..."}
                 </button>
                 <button
                   onClick={loadAllProposicoes}
-                  disabled={loadingAll}
+                  disabled={loadingAll || depProjLoading}
                   style={{
                     padding: "8px 24px",
                     borderRadius: 8,
                     border: "none",
-                    background: loadingAll ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
-                    color: loadingAll ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
+                    background: (loadingAll || depProjLoading) ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
+                    color: (loadingAll || depProjLoading) ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
                     fontSize: 12,
                     fontWeight: 700,
-                    cursor: loadingAll ? "default" : "pointer",
+                    cursor: (loadingAll || depProjLoading) ? "default" : "pointer",
                   }}
                 >
                   {loadingAll ? "Carregando todas..." : "Carregar Todas as Proposições"}
@@ -2801,6 +2828,8 @@
       const [filters, setFilters] = useState({ tipo: "", ano: "", regime: "", apreciacao: "", comissao: "", area: "", sort: "recente" });
       const [sidebarOpen, setSidebarOpen] = useState(false);
       const [lastTramitacoes, setLastTramitacoes] = useState({}); // { projectId: tramitacaoObj }
+      const [selectMode, setSelectMode] = useState(false);
+      const [selectedIds, setSelectedIds] = useState(new Set());
     
       const monitoredIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
       const unreadCount = notifications.filter((n) => !n.read).length;
@@ -2866,8 +2895,28 @@
       // Remove project
       const removeProject = useCallback((id) => {
         setProjects((prev) => prev.filter((p) => p.id !== id));
+        setSelectedIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
         addToast("Projeto removido", "warning");
       }, [addToast]);
+
+      // Remove multiple projects
+      const removeMultipleProjects = useCallback((ids) => {
+        const idSet = new Set(ids);
+        setProjects((prev) => prev.filter((p) => !idSet.has(p.id)));
+        setSelectedIds(new Set());
+        setSelectMode(false);
+        addToast(`${ids.length} projeto(s) removido(s)`, "warning");
+      }, [addToast]);
+
+      // Toggle selection
+      const toggleSelect = useCallback((id) => {
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+      }, []);
     
       // Refresh all projects
       const refreshAll = useCallback(async () => {
@@ -3266,6 +3315,95 @@
     
                     <SummaryPanel projects={projects} />
                     <FilterBar filters={filters} setFilters={setFilters} projects={projects} />
+
+                    {/* Bulk actions bar */}
+                    {projects.length > 0 && (
+                      <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+                        <button
+                          onClick={() => { setSelectMode(!selectMode); setSelectedIds(new Set()); }}
+                          style={{
+                            padding: "6px 14px",
+                            borderRadius: 6,
+                            border: `1px solid ${selectMode ? "#dc2626" : (dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)")}`,
+                            background: selectMode ? (dark ? "rgba(220,38,38,0.1)" : "rgba(220,38,38,0.05)") : "none",
+                            color: selectMode ? "#dc2626" : (dark ? "#9ca3af" : "#6b7280"),
+                            fontSize: 12,
+                            fontWeight: 700,
+                            cursor: "pointer",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                          }}
+                        >
+                          {selectMode ? <><Icons.X /> Cancelar seleção</> : <><Icons.Check /> Selecionar</>}
+                        </button>
+                        {selectMode && (
+                          <>
+                            <button
+                              onClick={() => setSelectedIds(new Set(filtered.map((p) => p.id)))}
+                              style={{
+                                padding: "6px 14px",
+                                borderRadius: 6,
+                                border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+                                background: "none",
+                                color: dark ? "#9ca3af" : "#6b7280",
+                                fontSize: 12,
+                                fontWeight: 700,
+                                cursor: "pointer",
+                              }}
+                            >
+                              Selecionar todos ({filtered.length})
+                            </button>
+                            {selectedIds.size > 0 && (
+                              <button
+                                onClick={() => removeMultipleProjects([...selectedIds])}
+                                style={{
+                                  padding: "6px 14px",
+                                  borderRadius: 6,
+                                  border: "none",
+                                  background: "#dc2626",
+                                  color: "#fff",
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                  cursor: "pointer",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 4,
+                                }}
+                              >
+                                <Icons.Trash /> Remover selecionados ({selectedIds.size})
+                              </button>
+                            )}
+                          </>
+                        )}
+                        {!selectMode && projects.length > 1 && (
+                          <button
+                            onClick={() => {
+                              if (confirm(`Remover todos os ${projects.length} projetos monitorados?`)) {
+                                setProjects([]);
+                                setSelectedIds(new Set());
+                                addToast(`${projects.length} projetos removidos`, "warning");
+                              }
+                            }}
+                            style={{
+                              padding: "6px 14px",
+                              borderRadius: 6,
+                              border: `1px solid ${dark ? "rgba(220,38,38,0.3)" : "rgba(220,38,38,0.2)"}`,
+                              background: "none",
+                              color: "#dc2626",
+                              fontSize: 12,
+                              fontWeight: 700,
+                              cursor: "pointer",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 4,
+                            }}
+                          >
+                            <Icons.Trash /> Remover todos
+                          </button>
+                        )}
+                      </div>
+                    )}
     
                     {filtered.length === 0 && projects.length === 0 && (
                       <div style={{
@@ -3314,9 +3452,12 @@
                         <ProjetoCard
                           key={p.id}
                           project={p}
-                          onSelect={(proj) => { setSelectedProject(proj); setView("details"); }}
+                          onSelect={(proj) => { if (selectMode) { toggleSelect(proj.id); } else { setSelectedProject(proj); setView("details"); } }}
                           onRemove={removeProject}
                           lastTramitacao={lastTramitacoes[p.id] || null}
+                          selectMode={selectMode}
+                          selected={selectedIds.has(p.id)}
+                          onToggleSelect={toggleSelect}
                         />
                       ))}
                     </div>
@@ -3337,7 +3478,7 @@
             {showSearch && (
               <SearchModal
                 onClose={() => setShowSearch(false)}
-                onAdd={(item) => { addProject(item); setShowSearch(false); }}
+                onAdd={(item) => { addProject(item); }}
                 onAddMultiple={(items) => { addMultipleProjects(items); }}
                 monitoredIds={monitoredIds}
                 addToast={addToast}
