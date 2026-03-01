@@ -252,6 +252,314 @@ async function getAutores(id) {
   return data.dados || [];
 }
 
+// ─── Regimento Interno Reference Data ───────────────────────────────────
+// Based on the Regimento Interno da Câmara dos Deputados (RICD)
+const REGIMENTO_INTERNO = {
+  regimes: {
+    "Urgência": {
+      artigos: "Art. 152 a 154",
+      descricao: "Dispensa de exigências regimentais para tramitação imediata. Matéria é incluída automaticamente na Ordem do Dia, podendo ser deliberada na mesma sessão.",
+      prazo: "O projeto deve ser apreciado em até 2 sessões para urgência urgentíssima (Art. 155) ou sem prazo definido, com prioridade na pauta.",
+      impacto: "Alto — A proposição tem prioridade sobre as demais na deliberação.",
+      tipos: [
+        "Urgência constitucional (Art. 64, §1º CF) — iniciativa do Presidente da República, prazo de 45 dias por Casa",
+        "Urgência regimental (Art. 153 RICD) — aprovada por maioria absoluta ou líderes que representem esse número",
+        "Urgência urgentíssima (Art. 155 RICD) — inclusão imediata na Ordem do Dia por 2/3 dos membros ou líderes"
+      ],
+    },
+    "Prioridade": {
+      artigos: "Art. 151, II",
+      descricao: "Proposição que deve ser incluída na Ordem do Dia logo após as matérias em regime de urgência. Dispensa de interstícios, exceto publicação e distribuição.",
+      prazo: "Sem prazo específico, mas tem precedência sobre o regime ordinário.",
+      impacto: "Médio — Precedência na pauta após as urgências.",
+      tipos: [
+        "Projetos de iniciativa do Poder Executivo, Judiciário e MPU",
+        "Projetos de lei complementar",
+        "Projetos com pareceres contrários de todas as comissões"
+      ],
+    },
+    "Ordinário": {
+      artigos: "Art. 151, III",
+      descricao: "Tramitação padrão, seguindo a ordem cronológica de distribuição e todos os interstícios regimentais.",
+      prazo: "Até 40 sessões por comissão (prorrogáveis por mais 10). Comissão de mérito: 20 sessões. CCJC: 15 sessões para admissibilidade.",
+      impacto: "Normal — Segue o fluxo padrão de tramitação.",
+      tipos: [
+        "Todas as proposições que não se enquadrem nos demais regimes"
+      ],
+    },
+    "Especial": {
+      artigos: "Art. 191 a 202",
+      descricao: "Aplicável a PECs. Exige Comissão Especial e quórum qualificado de 3/5 para aprovação em dois turnos.",
+      prazo: "Comissão Especial tem 40 sessões para proferir parecer (Art. 202).",
+      impacto: "Alto — Tramitação diferenciada com quórum qualificado.",
+      tipos: [
+        "Propostas de Emenda à Constituição (PEC)"
+      ],
+    },
+  },
+  apreciacoes: {
+    "Plenário": {
+      descricao: "A matéria será votada pelo Plenário da Câmara dos Deputados, composto por todos os 513 deputados.",
+      artigo: "Art. 24, II",
+      quorum: "Maioria simples (maioria dos presentes), salvo exceções constitucionais.",
+      quando: "Projetos de lei complementar, PECs, matérias em regime de urgência, e projetos que receberam recurso contra poder conclusivo das comissões.",
+    },
+    "Comissão com poder conclusivo": {
+      descricao: "As comissões têm competência para aprovar definitivamente a matéria, sem necessidade de votação em Plenário (poder terminativo).",
+      artigo: "Art. 24, II e Art. 58, §2º, I da CF",
+      quorum: "Maioria simples dos membros da comissão.",
+      quando: "Projetos de lei ordinária em regime de tramitação ordinária ou de prioridade. Pode ser contestado por recurso de 1/10 dos membros da Casa (Art. 132, §2º).",
+    },
+    "Comissão": {
+      descricao: "A matéria está em fase de análise por uma ou mais comissões temáticas da Câmara.",
+      artigo: "Art. 32 a 64",
+      quorum: "Maioria simples dos membros presentes à reunião.",
+      quando: "Fase intermediária — todas as proposições passam por comissões antes da deliberação final.",
+    },
+  },
+  fases: [
+    { id: "apresentacao", label: "Apresentação", descricao: "Proposição é apresentada e lida em Plenário ou recebida pela Mesa." },
+    { id: "despacho", label: "Despacho", descricao: "A Mesa Diretora distribui a matéria às comissões competentes (Art. 139)." },
+    { id: "comissoes", label: "Comissões", descricao: "Análise e elaboração de pareceres pelas comissões designadas." },
+    { id: "parecer", label: "Parecer", descricao: "Relator apresenta parecer — pode ser pela aprovação, rejeição, ou aprovação com substitutivo." },
+    { id: "plenario", label: "Plenário", descricao: "Matéria incluída na Ordem do Dia para deliberação pelo Plenário." },
+    { id: "votacao", label: "Votação", descricao: "Deliberação: votação simbólica, nominal ou secreta (Art. 184 a 188)." },
+    { id: "revisao", label: "Revisão", descricao: "Envio ao Senado Federal (casa revisora) para apreciação (Art. 65 CF)." },
+    { id: "sancao", label: "Sanção/Veto", descricao: "Presidente da República sanciona ou veta (total ou parcialmente) o projeto (Art. 66 CF)." },
+  ],
+  orgaos: {
+    "PLEN": { nome: "Plenário", descricao: "Órgão máximo de deliberação da Câmara, composto por todos os 513 deputados." },
+    "MESA": { nome: "Mesa Diretora", descricao: "Dirige os trabalhos legislativos e administrativos da Câmara (Art. 14 RICD)." },
+    "CCJC": { nome: "Comissão de Constituição e Justiça e de Cidadania", descricao: "Analisa constitucionalidade, legalidade e juridicidade das proposições (Art. 32, IV)." },
+    "CFT": { nome: "Comissão de Finanças e Tributação", descricao: "Analisa adequação financeira e orçamentária das proposições (Art. 32, V)." },
+    "CE": { nome: "Comissão de Educação", descricao: "Competente para matérias relativas à educação, cultura e desporto." },
+    "CSSF": { nome: "Comissão de Saúde", descricao: "Competente para matérias de seguridade social, saúde pública e previdência." },
+    "CCTCI": { nome: "Comissão de Ciência, Tecnologia, Comunicação e Informática", descricao: "Competente para matérias de ciência, tecnologia e telecomunicações." },
+    "CTD": { nome: "Comissão de Trabalho, Administração e Serviço Público", descricao: "Competente para matérias de relações de trabalho e serviço público." },
+    "CDC": { nome: "Comissão de Defesa do Consumidor", descricao: "Competente para matérias de defesa do consumidor e do contribuinte." },
+    "CME": { nome: "Comissão de Minas e Energia", descricao: "Competente para matérias de exploração mineral, recursos hídricos e energéticos." },
+    "CREDN": { nome: "Comissão de Relações Exteriores e de Defesa Nacional", descricao: "Competente para matérias de política externa e defesa nacional." },
+  },
+  tiposProposicao: {
+    "PL": { nome: "Projeto de Lei Ordinária", descricao: "Proposta de lei que exige maioria simples para aprovação (Art. 47 CF).", tramitacao: "Pode ser apreciado em regime ordinário, de prioridade ou de urgência." },
+    "PLP": { nome: "Projeto de Lei Complementar", descricao: "Exige maioria absoluta para aprovação (Art. 69 CF). Regulamenta matérias previstas na Constituição.", tramitacao: "Sempre apreciado pelo Plenário, não pode ter poder conclusivo nas comissões." },
+    "PEC": { nome: "Proposta de Emenda à Constituição", descricao: "Modifica o texto constitucional. Exige 3/5 dos votos em dois turnos (Art. 60 CF).", tramitacao: "Tramita em Comissão Especial com 40 sessões, depois Plenário em dois turnos." },
+    "MPV": { nome: "Medida Provisória", descricao: "Ato do Presidente com força de lei imediata, para casos de relevância e urgência (Art. 62 CF).", tramitacao: "Vigência de 60 dias, prorrogáveis por mais 60. Comissão Mista e depois cada Casa." },
+    "PDL": { nome: "Projeto de Decreto Legislativo", descricao: "Competência exclusiva do Congresso (Art. 49 CF). Não depende de sanção presidencial.", tramitacao: "Aprovado por maioria simples, sem sanção do Executivo." },
+    "PRC": { nome: "Projeto de Resolução da Câmara", descricao: "Regula matérias de competência privativa da Câmara dos Deputados.", tramitacao: "Tramitação interna à Câmara." },
+    "REQ": { nome: "Requerimento", descricao: "Solicitação feita por deputado ou comissão para deliberação do Plenário ou de comissão.", tramitacao: "Apreciação imediata ou na sessão seguinte." },
+    "RIC": { nome: "Requerimento de Informação", descricao: "Pedido de informações a Ministro de Estado ou autoridades (Art. 50, §2º CF).", tramitacao: "Prazo de 30 dias para resposta." },
+  },
+  situacoes: {
+    "Aguardando Deliberação": "A proposição está na Ordem do Dia, pronta para ser votada quando for incluída na pauta.",
+    "Pronta para Pauta": "O parecer foi aprovado nas comissões e a matéria está pronta para inclusão na Ordem do Dia.",
+    "Aguardando Parecer": "A matéria foi distribuída ao relator, que ainda não apresentou seu parecer.",
+    "Aguardando Designação de Relator": "A comissão recebeu a matéria, mas ainda não designou o deputado relator.",
+    "Tramitando em Conjunto": "A proposição tramita apensada a outra(s) de teor semelhante (Art. 142 e 143 RICD).",
+    "Aguardando Admissibilidade": "PEC aguardando análise de admissibilidade pela CCJC.",
+    "Parecer Aprovado": "O relator apresentou parecer e este foi aprovado pela comissão.",
+    "Regime Especial": "Matéria teve alteração de regime de tramitação (ex: aprovação de requerimento de urgência).",
+    "Apresentação": "A proposição foi formalmente apresentada e registrada na Câmara.",
+    "Despacho": "A Mesa distribuiu a proposição às comissões competentes para análise.",
+    "Designação de Relator": "Um deputado foi designado como relator da matéria na comissão.",
+    "Arquivada": "Proposição arquivada por fim de legislatura (Art. 105 RICD) ou rejeição.",
+    "Transformada em Lei": "Proposição aprovada, sancionada e publicada como norma jurídica.",
+  },
+};
+
+// Infer current legislative stage from status
+function inferStage(status, tramitacoes) {
+  if (!status) return "apresentacao";
+  const sit = (status.descricaoSituacao || "").toLowerCase();
+  const orgao = (status.siglaOrgao || "").toUpperCase();
+
+  if (sit.includes("transformad")) return "sancao";
+  if (sit.includes("sancion") || sit.includes("veto")) return "sancao";
+  if (sit.includes("revis") || sit.includes("senado")) return "revisao";
+  if (sit.includes("votaç") || sit.includes("votac") || sit.includes("deliberaç") || sit.includes("deliberac")) {
+    return orgao === "PLEN" ? "votacao" : "comissoes";
+  }
+  if (sit.includes("pronta para pauta") || sit.includes("ordem do dia")) return "plenario";
+  if (sit.includes("parecer")) return "parecer";
+  if (sit.includes("relator")) return "comissoes";
+  if (sit.includes("aguardando") && (sit.includes("parecer") || sit.includes("relator"))) return "comissoes";
+  if (sit.includes("tramitando")) return "comissoes";
+  if (sit.includes("despacho")) return "despacho";
+  if (sit.includes("apresenta")) return "apresentacao";
+
+  // Fallback based on organ
+  if (orgao === "PLEN") return "plenario";
+  if (orgao === "MESA") return "despacho";
+  return "comissoes";
+}
+
+// ─── Strategic Recommendation Engine ────────────────────────────────────
+// Suggests the best procedural measure to accelerate a project based on RICD
+function getStrategicRecommendation(project, tramitacoes) {
+  const status = project.statusProposicao || {};
+  const regime = (status.regime || "").toLowerCase();
+  const sit = (status.descricaoSituacao || "").toLowerCase();
+  const orgao = (status.siglaOrgao || "").toUpperCase();
+  const tipo = (project.siglaTipo || "").toUpperCase();
+  const stage = inferStage(status, tramitacoes);
+
+  const recommendations = [];
+
+  // If not yet in urgency, suggest requesting it
+  if (!regime.includes("urgência") && !regime.includes("urgencia") && tipo !== "PEC") {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Requerer Urgência",
+      base: "Art. 153 e 154 RICD",
+      descricao: "Apresentar requerimento de urgência assinado por maioria absoluta dos Deputados ou líderes que representem esse número. Dispensa interstícios e inclui a matéria imediatamente na Ordem do Dia.",
+      impacto: "alto",
+    });
+    recommendations.push({
+      prioridade: 2,
+      acao: "Requerer Urgência Urgentíssima",
+      base: "Art. 155 RICD",
+      descricao: "Se aprovado por 2/3 dos membros da Casa ou líderes que representem esse número, permite incluir a matéria na Ordem do Dia para discussão e votação imediata.",
+      impacto: "muito alto",
+    });
+  }
+
+  // Stage-specific recommendations
+  if (stage === "apresentacao" || stage === "despacho") {
+    recommendations.push({
+      prioridade: 3,
+      acao: "Acompanhar distribuição às Comissões",
+      base: "Art. 139 RICD",
+      descricao: "Verificar se o despacho da Mesa distribuiu a matéria às comissões adequadas. Pode-se requerer redistribuição se houver erro (Art. 141).",
+      impacto: "médio",
+    });
+  }
+
+  if (stage === "comissoes") {
+    if (sit.includes("relator")) {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Solicitar celeridade ao Relator",
+        base: "Art. 52 RICD",
+        descricao: "O relator tem prazo de 10 sessões (ordinário) ou 5 sessões (urgência/prioridade) para apresentar parecer. Esgotado o prazo, pode-se requerer a designação de novo relator.",
+        impacto: "alto",
+      });
+    }
+    if (sit.includes("parecer")) {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Requerer inclusão na pauta da Comissão",
+        base: "Art. 47 RICD",
+        descricao: "Solicitar ao Presidente da Comissão a inclusão imediata da matéria na pauta de reunião para votação do parecer.",
+        impacto: "alto",
+      });
+    }
+    recommendations.push({
+      prioridade: 4,
+      acao: "Requerer audiência pública",
+      base: "Art. 255 a 258 RICD",
+      descricao: "Audiência pública pode dar visibilidade e pressão política para a tramitação, embora possa adicionar tempo ao processo.",
+      impacto: "médio",
+    });
+  }
+
+  if (stage === "plenario" || sit.includes("pronta para pauta") || sit.includes("ordem do dia")) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Solicitar inclusão na Ordem do Dia",
+      base: "Art. 17, I, s RICD",
+      descricao: "Solicitar ao Presidente da Câmara a inclusão da matéria na Ordem do Dia. Em regime de urgência, a inclusão é automática.",
+      impacto: "alto",
+    });
+    recommendations.push({
+      prioridade: 3,
+      acao: "Requerer preferência na votação",
+      base: "Art. 160 RICD",
+      descricao: "Requerimento para que a matéria seja discutida e votada antes das demais da Ordem do Dia.",
+      impacto: "médio",
+    });
+  }
+
+  if (sit.includes("conjunto") || sit.includes("apensad")) {
+    recommendations.push({
+      prioridade: 2,
+      acao: "Verificar proposição principal",
+      base: "Art. 142 e 143 RICD",
+      descricao: "Quando proposições tramitam em conjunto, o andamento depende da proposição principal (mais antiga). Acompanhar a tramitação da principal para prever o andamento.",
+      impacto: "médio",
+    });
+    recommendations.push({
+      prioridade: 3,
+      acao: "Requerer desapensação",
+      base: "Art. 142, §1º RICD",
+      descricao: "Se as proposições não são semelhantes ou se a apensação prejudica a tramitação, pode-se requerer a desapensação.",
+      impacto: "médio",
+    });
+  }
+
+  // PEC-specific
+  if (tipo === "PEC") {
+    if (stage === "comissoes" || sit.includes("admissibilidade")) {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Acompanhar admissibilidade na CCJC",
+        base: "Art. 202 RICD",
+        descricao: "PEC precisa ser admitida pela CCJC antes de ir à Comissão Especial. Prazo de 5 sessões para o relator na CCJC.",
+        impacto: "alto",
+      });
+    }
+    recommendations.push({
+      prioridade: 2,
+      acao: "Monitorar Comissão Especial",
+      base: "Art. 202, §2º RICD",
+      descricao: "Após admissibilidade, deve ser criada Comissão Especial com prazo de 40 sessões para proferir parecer.",
+      impacto: "alto",
+    });
+  }
+
+  // Sort by priority
+  recommendations.sort((a, b) => a.prioridade - b.prioridade);
+  return recommendations.slice(0, 3); // Return top 3
+}
+
+// Describe current rite/procedure the project will follow
+function describeRite(project) {
+  const status = project.statusProposicao || {};
+  const tipo = (project.siglaTipo || "").toUpperCase();
+  const regime = (status.regime || "").toLowerCase();
+  const orgao = (status.siglaOrgao || "").toUpperCase();
+  const sit = (status.descricaoSituacao || "").toLowerCase();
+
+  let rito = "";
+
+  if (tipo === "PEC") {
+    rito = "CCJC (admissibilidade) → Comissão Especial → Plenário (2 turnos, 3/5 dos votos) → Senado";
+  } else if (tipo === "PLP") {
+    rito = "Comissões temáticas → CCJC → Plenário (maioria absoluta) → Senado → Sanção";
+  } else if (tipo === "MPV") {
+    rito = "Comissão Mista → Plenário Câmara → Plenário Senado (prazo de 60+60 dias)";
+  } else if (tipo === "PDL") {
+    rito = "Comissões → Plenário (maioria simples) — sem sanção presidencial";
+  } else {
+    // PL and others
+    const apreciacao = (status.apreciacao || "").toLowerCase();
+    if (apreciacao.includes("conclusivo")) {
+      rito = "Comissões (poder conclusivo) → Senado → Sanção — sem necessidade de Plenário";
+    } else {
+      rito = "Comissões temáticas → CCJC/CFT → Plenário (maioria simples) → Senado → Sanção";
+    }
+  }
+
+  // Current position
+  let posicaoAtual = "";
+  if (orgao && REGIMENTO_INTERNO.orgaos[orgao]) {
+    posicaoAtual = REGIMENTO_INTERNO.orgaos[orgao].nome;
+  } else if (orgao) {
+    posicaoAtual = orgao;
+  }
+
+  return { rito, posicaoAtual };
+}
+
 // ─── Regime / Apreciação Utils ─────────────────────────────────────────
 function regimeBadge(regime) {
   if (!regime) return { label: "—", color: "#6b7280", bg: "#f3f4f6" };
@@ -467,13 +775,18 @@ function SummaryPanel({ projects }) {
   );
 }
 
-// ─── Project Card ──────────────────────────────────────────────────────
-function ProjetoCard({ project, onSelect, onRemove }) {
+// ─── Project Card (Enhanced with realtime info) ────────────────────────
+function ProjetoCard({ project, onSelect, onRemove, lastTramitacao }) {
   const { dark } = useContext(AppContext);
   const status = project.statusProposicao || {};
   const regime = regimeBadge(status.regime);
   const aprec = apreciacaoBadge(status.apreciacao);
   const urgente = isUrgente(status.regime);
+  const { rito, posicaoAtual } = describeRite(project);
+  const stage = inferStage(status);
+  const stageInfo = REGIMENTO_INTERNO.fases.find((f) => f.id === stage);
+  const topRec = getStrategicRecommendation(project, [])[0];
+  const situacaoExpl = REGIMENTO_INTERNO.situacoes[status.descricaoSituacao] || null;
 
   return (
     <div
@@ -519,7 +832,7 @@ function ProjetoCard({ project, onSelect, onRemove }) {
         </button>
       </div>
 
-      <p style={{ fontSize: 13, color: dark ? "#9ca3af" : "#6b7280", margin: "0 0 12px", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+      <p style={{ fontSize: 13, color: dark ? "#9ca3af" : "#6b7280", margin: "0 0 10px", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
         {project.ementa}
       </p>
 
@@ -528,11 +841,77 @@ function ProjetoCard({ project, onSelect, onRemove }) {
         <Badge {...regime} />
       </div>
 
+      {/* Current status with explanation */}
       {status.descricaoSituacao && (
-        <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", display: "flex", alignItems: "center", gap: 4 }}>
+        <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", display: "flex", alignItems: "center", gap: 4, marginBottom: 6 }}>
           <Icons.Clock />
-          <span>{status.descricaoSituacao}</span>
-          {status.siglaOrgao && <span style={{ fontWeight: 700 }}> — {status.siglaOrgao}</span>}
+          <span style={{ fontWeight: 600 }}>{status.descricaoSituacao}</span>
+          {status.siglaOrgao && <span style={{ fontWeight: 700 }}> — {posicaoAtual || status.siglaOrgao}</span>}
+        </div>
+      )}
+
+      {/* Latest tramitação */}
+      {lastTramitacao && (
+        <div style={{
+          marginTop: 8,
+          padding: "8px 10px",
+          borderRadius: 6,
+          background: dark ? "rgba(0,122,55,0.08)" : "rgba(0,122,55,0.04)",
+          border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.1)"}`,
+        }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#007A37", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3 }}>
+            Ultimo Andamento
+          </div>
+          <div style={{ fontSize: 11, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.4 }}>
+            {lastTramitacao.descricaoTramitacao
+              ? (lastTramitacao.descricaoTramitacao.length > 120
+                ? lastTramitacao.descricaoTramitacao.slice(0, 120) + "..."
+                : lastTramitacao.descricaoTramitacao)
+              : lastTramitacao.descricaoSituacao || "—"
+            }
+          </div>
+          {lastTramitacao.dataHora && (
+            <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af", marginTop: 3 }}>
+              {new Date(lastTramitacao.dataHora).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Rite/Procedure path */}
+      <div style={{
+        marginTop: 8,
+        padding: "6px 10px",
+        borderRadius: 6,
+        background: dark ? "rgba(37,99,235,0.08)" : "rgba(37,99,235,0.04)",
+        border: `1px solid ${dark ? "rgba(37,99,235,0.15)" : "rgba(37,99,235,0.08)"}`,
+      }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: "#2563eb", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 2 }}>
+          Rito a Seguir
+        </div>
+        <div style={{ fontSize: 10, color: dark ? "#9ca3af" : "#6b7280", lineHeight: 1.4 }}>
+          {rito}
+        </div>
+      </div>
+
+      {/* Top strategic recommendation */}
+      {topRec && (
+        <div style={{
+          marginTop: 8,
+          padding: "6px 10px",
+          borderRadius: 6,
+          background: dark ? "rgba(234,88,12,0.08)" : "rgba(234,88,12,0.04)",
+          border: `1px solid ${dark ? "rgba(234,88,12,0.15)" : "rgba(234,88,12,0.08)"}`,
+        }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#ea580c", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 2 }}>
+            Para Acelerar
+          </div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: dark ? "#d1d5db" : "#374151" }}>
+            {topRec.acao}
+          </div>
+          <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
+            {topRec.base} — Impacto: {topRec.impacto}
+          </div>
         </div>
       )}
     </div>
@@ -1018,6 +1397,7 @@ function FilterBar({ filters, setFilters, projects }) {
             <option value="conclusivo">Conclusivo</option>
           </select>
           <select value={filters.sort} onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value }))} style={selectStyle}>
+            <option value="recente">Andamento mais recente</option>
             <option value="urgencia">Urgência primeiro</option>
             <option value="nome">Tipo/Número</option>
             <option value="ano">Ano (recente)</option>
@@ -1238,11 +1618,282 @@ function ProjetoDetalhes({ project, onBack, addToast }) {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: "flex", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`, marginBottom: 20 }}>
+      <div style={{ display: "flex", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`, marginBottom: 20, flexWrap: "wrap" }}>
         <button style={tabStyle(tab === "tramitacoes")} onClick={() => setTab("tramitacoes")}>
           Tramitações ({tramitacoes.length})
         </button>
+        <button style={tabStyle(tab === "processo")} onClick={() => setTab("processo")}>
+          Processo Legislativo
+        </button>
+        <button style={tabStyle(tab === "estrategia")} onClick={() => setTab("estrategia")}>
+          Estratégia
+        </button>
       </div>
+
+      {/* ── Processo Legislativo Tab ── */}
+      {tab === "processo" && (() => {
+        const currentStage = inferStage(status, tramitacoes);
+        const fases = REGIMENTO_INTERNO.fases;
+        const currentIdx = fases.findIndex((f) => f.id === currentStage);
+        const tipoInfo = REGIMENTO_INTERNO.tiposProposicao[project.siglaTipo] || null;
+        const regimeInfo = REGIMENTO_INTERNO.regimes[status.regime] || null;
+        const aprecInfo = REGIMENTO_INTERNO.apreciacoes[status.apreciacao] || null;
+        const orgaoInfo = REGIMENTO_INTERNO.orgaos[status.siglaOrgao] || null;
+        const situacaoExpl = REGIMENTO_INTERNO.situacoes[status.descricaoSituacao] || null;
+        const { rito } = describeRite(project);
+
+        return (
+          <div>
+            {/* Stage Progress Indicator */}
+            <div style={{
+              padding: "20px",
+              borderRadius: 12,
+              background: dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)",
+              border: `1px solid ${dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)"}`,
+              marginBottom: 20,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: dark ? "#9ca3af" : "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 16 }}>
+                Fase Atual do Processo
+              </div>
+              <div style={{ display: "flex", gap: 2, alignItems: "center", overflowX: "auto", paddingBottom: 8 }}>
+                {fases.map((fase, i) => {
+                  const isCurrent = fase.id === currentStage;
+                  const isPast = i < currentIdx;
+                  const bgColor = isCurrent ? "#007A37" : isPast ? (dark ? "rgba(0,122,55,0.3)" : "rgba(0,122,55,0.15)") : (dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)");
+                  const txtColor = isCurrent ? "#fff" : isPast ? "#007A37" : (dark ? "#6b7280" : "#9ca3af");
+
+                  return (
+                    <div key={fase.id} style={{ display: "flex", alignItems: "center", gap: 2, flex: "0 0 auto" }}>
+                      <div
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: 6,
+                          background: bgColor,
+                          color: txtColor,
+                          fontSize: 10,
+                          fontWeight: isCurrent ? 800 : 600,
+                          whiteSpace: "nowrap",
+                          border: isCurrent ? "2px solid #007A37" : "1px solid transparent",
+                          position: "relative",
+                        }}
+                        title={fase.descricao}
+                      >
+                        {isPast && "✓ "}{fase.label}
+                        {isCurrent && (
+                          <div style={{
+                            position: "absolute",
+                            bottom: -8,
+                            left: "50%",
+                            transform: "translateX(-50%)",
+                            width: 0,
+                            height: 0,
+                            borderLeft: "5px solid transparent",
+                            borderRight: "5px solid transparent",
+                            borderTop: "5px solid #007A37",
+                          }} />
+                        )}
+                      </div>
+                      {i < fases.length - 1 && (
+                        <div style={{ width: 12, height: 2, background: isPast ? "#007A37" : (dark ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.1)") }} />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {fases[currentIdx] && (
+                <div style={{ marginTop: 12, fontSize: 12, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.5 }}>
+                  <strong>Fase atual:</strong> {fases[currentIdx].descricao}
+                </div>
+              )}
+            </div>
+
+            {/* Rite Path */}
+            <div style={{
+              padding: "16px 20px",
+              borderRadius: 12,
+              background: dark ? "rgba(37,99,235,0.06)" : "rgba(37,99,235,0.03)",
+              border: `1px solid ${dark ? "rgba(37,99,235,0.15)" : "rgba(37,99,235,0.08)"}`,
+              marginBottom: 20,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#2563eb", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>
+                Rito de Tramitação
+              </div>
+              <div style={{ fontSize: 13, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.6 }}>
+                {rito}
+              </div>
+            </div>
+
+            {/* Type Info */}
+            {tipoInfo && (
+              <div style={{
+                padding: "16px 20px",
+                borderRadius: 12,
+                background: dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)",
+                border: `1px solid ${dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)"}`,
+                marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#6b7280" : "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+                  Tipo: {tipoInfo.nome}
+                </div>
+                <p style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", margin: "0 0 6px", lineHeight: 1.5 }}>{tipoInfo.descricao}</p>
+                <p style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", margin: 0, lineHeight: 1.5 }}><strong>Tramitação:</strong> {tipoInfo.tramitacao}</p>
+              </div>
+            )}
+
+            {/* Regime Info */}
+            {regimeInfo && (
+              <div style={{
+                padding: "16px 20px",
+                borderRadius: 12,
+                background: dark ? "rgba(220,38,38,0.06)" : "rgba(220,38,38,0.03)",
+                border: `1px solid ${dark ? "rgba(220,38,38,0.15)" : "rgba(220,38,38,0.08)"}`,
+                marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#dc2626", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+                  Regime: {status.regime} ({regimeInfo.artigos})
+                </div>
+                <p style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", margin: "0 0 6px", lineHeight: 1.5 }}>{regimeInfo.descricao}</p>
+                <p style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", margin: "0 0 6px", lineHeight: 1.5 }}><strong>Prazo:</strong> {regimeInfo.prazo}</p>
+                <p style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", margin: 0, lineHeight: 1.5 }}><strong>Impacto:</strong> {regimeInfo.impacto}</p>
+              </div>
+            )}
+
+            {/* Apreciação Info */}
+            {aprecInfo && (
+              <div style={{
+                padding: "16px 20px",
+                borderRadius: 12,
+                background: dark ? "rgba(37,99,235,0.06)" : "rgba(37,99,235,0.03)",
+                border: `1px solid ${dark ? "rgba(37,99,235,0.15)" : "rgba(37,99,235,0.08)"}`,
+                marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#2563eb", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+                  Apreciação: {status.apreciacao} ({aprecInfo.artigo})
+                </div>
+                <p style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", margin: "0 0 6px", lineHeight: 1.5 }}>{aprecInfo.descricao}</p>
+                <p style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", margin: "0 0 6px", lineHeight: 1.5 }}><strong>Quórum:</strong> {aprecInfo.quorum}</p>
+                <p style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", margin: 0, lineHeight: 1.5 }}><strong>Quando:</strong> {aprecInfo.quando}</p>
+              </div>
+            )}
+
+            {/* Current organ */}
+            {orgaoInfo && (
+              <div style={{
+                padding: "12px 16px",
+                borderRadius: 8,
+                background: dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)",
+                border: `1px solid ${dark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)"}`,
+                marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#6b7280" : "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
+                  Órgão Atual: {status.siglaOrgao}
+                </div>
+                <p style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", margin: "0 0 4px" }}><strong>{orgaoInfo.nome}</strong></p>
+                <p style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", margin: 0 }}>{orgaoInfo.descricao}</p>
+              </div>
+            )}
+
+            {/* Situação explanation */}
+            {situacaoExpl && (
+              <div style={{
+                padding: "12px 16px",
+                borderRadius: 8,
+                background: dark ? "rgba(0,122,55,0.06)" : "rgba(0,122,55,0.03)",
+                border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.08)"}`,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#007A37", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
+                  Situação: {status.descricaoSituacao}
+                </div>
+                <p style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", margin: 0, lineHeight: 1.5 }}>{situacaoExpl}</p>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── Estratégia Tab ── */}
+      {tab === "estrategia" && (() => {
+        const recs = getStrategicRecommendation(project, tramitacoes);
+        const situacaoExpl = REGIMENTO_INTERNO.situacoes[status.descricaoSituacao] || null;
+
+        return (
+          <div>
+            <div style={{
+              padding: "16px 20px",
+              borderRadius: 12,
+              background: dark ? "rgba(234,88,12,0.06)" : "rgba(234,88,12,0.03)",
+              border: `1px solid ${dark ? "rgba(234,88,12,0.15)" : "rgba(234,88,12,0.08)"}`,
+              marginBottom: 20,
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#ea580c", marginBottom: 4, fontFamily: "'Source Serif 4', Georgia, serif" }}>
+                Recomendações Estratégicas
+              </div>
+              <p style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", margin: 0 }}>
+                Medidas baseadas no Regimento Interno da Câmara dos Deputados para acelerar a tramitação desta proposição.
+              </p>
+            </div>
+
+            {recs.map((rec, i) => {
+              const impactColor = rec.impacto === "muito alto" || rec.impacto === "alto" ? "#dc2626" : rec.impacto === "médio" ? "#ea580c" : "#007A37";
+              return (
+                <div
+                  key={i}
+                  style={{
+                    padding: "16px 20px",
+                    borderRadius: 12,
+                    background: dark ? "rgba(255,255,255,0.03)" : "#fff",
+                    border: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+                    marginBottom: 12,
+                    borderLeft: `4px solid ${impactColor}`,
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <div style={{ fontWeight: 800, fontSize: 14, color: dark ? "#e5e7eb" : "#111827" }}>
+                      {i + 1}. {rec.acao}
+                    </div>
+                    <Badge
+                      label={`Impacto ${rec.impacto}`}
+                      color="#fff"
+                      bg={impactColor}
+                      small
+                    />
+                  </div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#007A37", marginBottom: 6 }}>
+                    {rec.base}
+                  </div>
+                  <p style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", margin: 0, lineHeight: 1.6 }}>
+                    {rec.descricao}
+                  </p>
+                </div>
+              );
+            })}
+
+            {recs.length === 0 && (
+              <p style={{ textAlign: "center", color: dark ? "#6b7280" : "#9ca3af", fontSize: 13, padding: "30px 0" }}>
+                Nenhuma recomendação estratégica adicional para o estágio atual.
+              </p>
+            )}
+
+            {/* Current position summary */}
+            {situacaoExpl && (
+              <div style={{
+                marginTop: 8,
+                padding: "14px 18px",
+                borderRadius: 10,
+                background: dark ? "rgba(0,122,55,0.06)" : "rgba(0,122,55,0.03)",
+                border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.08)"}`,
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#007A37", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+                  Contexto Regimental
+                </div>
+                <p style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", margin: 0, lineHeight: 1.5 }}>
+                  <strong>{status.descricaoSituacao}:</strong> {situacaoExpl}
+                </p>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Timeline */}
       {tab === "tramitacoes" && (
@@ -1251,6 +1902,8 @@ function ProjetoDetalhes({ project, onBack, addToast }) {
           {tramitacoes.map((t, i) => {
             const prevTram = tramitacoes[i + 1]; // previous in time (array is DESC)
             const regimeChanged = prevTram && t.regime && prevTram.regime && t.regime !== prevTram.regime;
+            const orgaoInfo = REGIMENTO_INTERNO.orgaos[t.siglaOrgao] || null;
+            const sitExpl = REGIMENTO_INTERNO.situacoes[t.descricaoSituacao] || null;
 
             return (
               <div key={i} style={{ position: "relative", marginBottom: 20, paddingBottom: 4 }}>
@@ -1269,7 +1922,11 @@ function ProjetoDetalhes({ project, onBack, addToast }) {
                 <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
                   <Icons.Clock />
                   {t.dataHora ? new Date(t.dataHora).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
-                  {t.siglaOrgao && <span style={{ fontWeight: 700 }}>• {t.siglaOrgao}</span>}
+                  {t.siglaOrgao && (
+                    <span style={{ fontWeight: 700 }} title={orgaoInfo ? orgaoInfo.nome : ""}>
+                      • {t.siglaOrgao}{orgaoInfo ? ` (${orgaoInfo.nome})` : ""}
+                    </span>
+                  )}
                 </div>
                 {regimeChanged && (
                   <div style={{ marginBottom: 6 }}>
@@ -1289,6 +1946,11 @@ function ProjetoDetalhes({ project, onBack, addToast }) {
                 <p style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", margin: 0, lineHeight: 1.5 }}>
                   {t.descricaoTramitacao}
                 </p>
+                {sitExpl && (
+                  <p style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af", margin: "4px 0 0", lineHeight: 1.4, fontStyle: "italic" }}>
+                    {sitExpl}
+                  </p>
+                )}
               </div>
             );
           })}
@@ -1396,8 +2058,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [filters, setFilters] = useState({ tipo: "", ano: "", regime: "", apreciacao: "", sort: "urgencia" });
+  const [filters, setFilters] = useState({ tipo: "", ano: "", regime: "", apreciacao: "", sort: "recente" });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [lastTramitacoes, setLastTramitacoes] = useState({}); // { projectId: tramitacaoObj }
 
   const monitoredIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
   const unreadCount = notifications.filter((n) => !n.read).length;
@@ -1506,6 +2169,11 @@ export default function App() {
 
         // Update stored project
         setProjects((prev) => prev.map((p) => p.id === proj.id ? { ...p, ...updated } : p));
+
+        // Store latest tramitação for dashboard
+        if (trams.length > 0) {
+          setLastTramitacoes((prev) => ({ ...prev, [proj.id]: trams[0] }));
+        }
       } catch (err) {
         console.warn(`Failed to refresh ${proj.id}:`, err);
       }
@@ -1527,6 +2195,24 @@ export default function App() {
 
     setRefreshing(false);
   }, [projects, refreshing, settings.pushEnabled, addToast]);
+
+  // Fetch latest tramitações for all projects on mount and when projects change
+  const fetchLastTramitacoes = useCallback(async () => {
+    const results = {};
+    for (const proj of projects) {
+      try {
+        const trams = await getTramitacoes(proj.id);
+        if (trams.length > 0) {
+          results[proj.id] = trams[0];
+        }
+      } catch { /* ignore */ }
+    }
+    setLastTramitacoes(results);
+  }, [projects]);
+
+  useEffect(() => {
+    if (projects.length > 0) fetchLastTramitacoes();
+  }, [projects.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Polling
   useEffect(() => {
@@ -1565,7 +2251,20 @@ export default function App() {
         return true;
       });
     }
-    if (filters.sort === "urgencia") {
+    if (filters.sort === "recente") {
+      // Sort by most recent tramitação first, then by urgency
+      list.sort((a, b) => {
+        const tramA = lastTramitacoes[a.id];
+        const tramB = lastTramitacoes[b.id];
+        const dateA = tramA?.dataHora ? new Date(tramA.dataHora).getTime() : 0;
+        const dateB = tramB?.dataHora ? new Date(tramB.dataHora).getTime() : 0;
+        if (dateA !== dateB) return dateB - dateA; // Most recent first
+        // Tiebreak by urgency
+        const ua = isUrgente(a.statusProposicao?.regime) ? 0 : 1;
+        const ub = isUrgente(b.statusProposicao?.regime) ? 0 : 1;
+        return ua - ub;
+      });
+    } else if (filters.sort === "urgencia") {
       list.sort((a, b) => {
         const ua = isUrgente(a.statusProposicao?.regime) ? 0 : 1;
         const ub = isUrgente(b.statusProposicao?.regime) ? 0 : 1;
@@ -1577,7 +2276,7 @@ export default function App() {
       list.sort((a, b) => `${a.siglaTipo}${a.numero}`.localeCompare(`${b.siglaTipo}${b.numero}`));
     }
     return list;
-  }, [projects, filters]);
+  }, [projects, filters, lastTramitacoes]);
 
   // Notification helpers
   const markRead = (idx) => {
@@ -1849,6 +2548,7 @@ export default function App() {
                       project={p}
                       onSelect={(proj) => { setSelectedProject(proj); setView("details"); }}
                       onRemove={removeProject}
+                      lastTramitacao={lastTramitacoes[p.id] || null}
                     />
                   ))}
                 </div>
