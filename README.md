@@ -241,7 +241,9 @@ O `index.html` é autossuficiente — contém todo o código da aplicação. O `
 
 ## API
 
-O LegisTracker consome os seguintes endpoints da [API Dados Abertos da Câmara](https://dadosabertos.camara.leg.br/swagger/api.html):
+O LegisTracker consome os seguintes endpoints da [API Dados Abertos da Câmara](https://dadosabertos.camara.leg.br/swagger/api.html).
+
+Todas as requisições passam por uma **fila global** com teto de concorrência (4 simultâneas) e espaçamento mínimo (~8 req/s), com **retry e backoff automáticos** para falhas de rede, respostas 429 e erros 5xx. Isso evita o rate limit da API — quando ele é atingido, as respostas bloqueadas chegam sem cabeçalhos CORS e o navegador as converte em "Failed to fetch".
 
 | Endpoint | Uso |
 |----------|-----|
