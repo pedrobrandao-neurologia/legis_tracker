@@ -68,6 +68,39 @@ Rotina de leitura em três janelas diárias, pensada para varreduras de manhã, 
 - **Votado + data** — marcação manual nos detalhes (checkbox + campo de data) e **detecção automática** a partir de tramitações que indiquem votação/aprovação (ex.: "Aprovado o projeto", "Aprovada a redação final", "Transformado em lei"); a detecção nunca sobrescreve uma marcação manual
 - **Filtro por ano** em duas dimensões, claramente separadas: **ano da proposição** (ano de apresentação) e **ano da votação** (ano registrado no campo "votado")
 
+### Estatísticas de Produção Legislativa
+
+Aba dedicada do dashboard que gera, para qualquer deputado buscado, um painel de produção legislativa com dados reais da API de Dados Abertos (cache local de 24h por deputado). Duas sub-abas:
+
+**1. Produção por Período (gráficos tradicionais, Chart.js 4)** — segmentável por período (57ª Legislatura, últimos 4 anos, últimos 8 anos, todo o período):
+
+- Proposições apresentadas por ano (barras)
+- Por tipo de proposição (barras empilhadas, top 6 tipos + outros)
+- Natureza: substantivas vs. simbólicas (barras empilhadas)
+- Atividade fiscalizatória por ano (RIC + requerimentos de informação/convocação/audiência)
+
+**2. Indicadores (4 eixos)** — inspirado no Índice Legisla Brasil, com guardrails da ciência política brasileira (cf. Figueiredo & Limongi: contagem bruta de proposições é artefato, não mérito):
+
+- **Radar SVG** dos 4 eixos normalizados 0–100 (SVG puro, sem dependências, com `aria-label`/`<title>`)
+- **Funil de tramitação SVG** — apresentada → relator designado → parecer aprovado em comissão → aprovada/lei, sobre amostra das 25 proposições substantivas mais recentes (o indicador mais honesto para o caso brasileiro)
+- **Cartão de benchmark** — escore de cada eixo + percentil real do deputado em volume de produção contra amostra da bancada do partido (estimada com poucas requisições via link `last` da paginação)
+- **Série temporal por semestre do mandato** (proposições da amostra, presença em eventos, discursos)
+- **Barras empilhadas por tipo e natureza** na legislatura atual
+- **Nota metodológica** no próprio painel, com todas as fórmulas
+
+Fórmulas e normalização (documentadas também no painel):
+
+| Eixo | Fórmula | Teto de referência (min-max) |
+|------|---------|------------------------------|
+| Produção | 0,6 × produção ponderada/ano + 0,4 × taxa de aproveitamento do funil | 60 pts/ano; 25% de aproveitamento |
+| Fiscalização | requerimentos fiscalizatórios ÷ anos de exercício | 30/ano |
+| Mobilização | 0,5 × discursos/ano + 0,5 × frentes parlamentares | 80 discursos/ano; 30 frentes |
+| Presença | eventos de comissão/plenário ÷ meses de exercício | 12/mês |
+
+Pesos por tipo na produção ponderada: PEC 5 · PLP 4 · PL/MPV 3 · PDL/PDC 2 · PRC 1,5 · demais 0,5; proposições **simbólicas** (homenagens, denominações de vias, datas comemorativas — inferidas pela ementa) têm peso reduzido a 20%. Todos os eixos são normalizados pelo **tempo efetivo de exercício** (data do último status "Exercício", não o calendário cheio), e o papel institucional (presidência de comissão, liderança) é exibido para contexto. Limitações declaradas no painel: relatorias não entram no eixo de produção (a API não expõe esse dado de forma consultável) e o alinhamento partidário em votações não está incluído.
+
+Se o CDN do Chart.js estiver indisponível, o módulo degrada graciosamente: radar e funil (SVG puro) continuam funcionando e os demais gráficos mostram mensagem clara.
+
 ### Busca e Monitoramento
 
 - **Busca por proposição** — formato `PL 1234/2023`, `PEC 45/2019`, etc. **Todos os tipos de proposição são aceitos**: PL, PEC, PLP, PDL, PDC, PRC, MPV, PLV, PLN, MSC, REQ, RIC, entre outros (qualquer sigla válida da API)
@@ -159,8 +192,9 @@ Cada tipo traz:
 
 - **React 18** — carregado via CDN (sem build step)
 - **Babel Standalone** — transpilação JSX no navegador
+- **Chart.js 4 (UMD via CDN)** — gráficos de barras e séries do módulo de estatísticas, integrado com `useRef` + `useEffect` (instância destruída no cleanup); radar e funil são SVG puro, sem dependências
 - **API Dados Abertos da Câmara v2** — `https://dadosabertos.camara.leg.br/api/v2`
-- **LocalStorage** — persistência de projetos, notificações, configurações e metadados por proposição (visto/timestamp, prioritário + motivação, votado + data, relatoria). A migração é **retrocompatível**: dados salvos por versões anteriores continuam funcionando — campos ausentes recebem valores padrão automaticamente
+- **LocalStorage** — persistência de projetos, notificações, configurações e metadados por proposição (visto/timestamp, prioritário + motivação, votado + data, relatoria). A migração é **retrocompatível**: dados salvos por versões anteriores continuam funcionando — campos ausentes recebem valores padrão automaticamente. As estatísticas por deputado são cacheadas com timestamp e **TTL de 24h** (máximo de 5 deputados no cache)
 
 ## Como Usar
 
@@ -220,6 +254,11 @@ O LegisTracker consome os seguintes endpoints da [API Dados Abertos da Câmara](
 | `GET /deputados/{id}` | Detalhes do deputado |
 | `GET /eventos` | Eventos legislativos (reuniões de comissão e sessões de Plenário) no intervalo de hoje a +7 dias |
 | `GET /eventos/{id}/pauta` | Proposições em pauta de cada evento — base das **notas de pauta** e do badge "Em pauta" |
+| `GET /deputados/{id}/orgaos` | Comissões e cargos do deputado (papel institucional nas estatísticas) |
+| `GET /deputados/{id}/eventos` | Participação em eventos — eixo **Presença** das estatísticas |
+| `GET /deputados/{id}/discursos` | Discursos — eixo **Mobilização** das estatísticas |
+| `GET /deputados/{id}/frentes` | Frentes parlamentares — eixo **Mobilização** das estatísticas |
+| `GET /deputados?siglaPartido=` | Bancada do partido — benchmark em percentil das estatísticas |
 
 ## Base Regimental
 
