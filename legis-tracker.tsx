@@ -9,6 +9,7 @@ const STORAGE_KEYS = {
   SETTINGS: "legis_settings",
   THEME: "legis_theme",
   LAST_TRAMITACOES: "legis_last_tram",
+  PROJECT_META: "legis_project_meta",
 };
 
 function loadStorage(key, fallback) {
@@ -21,6 +22,127 @@ function loadStorage(key, fallback) {
 }
 function saveStorage(key, val) {
   localStorage.setItem(key, JSON.stringify(val));
+}
+
+// ─── Per-project user metadata (visto, prioritário, votado, relatoria) ──
+// Persisted in localStorage under PROJECT_META, keyed by proposition id.
+// getMeta() merges stored values over defaults, so data saved by older
+// versions of the app (without these fields) keeps working untouched.
+const DEFAULT_META = {
+  vistoEm: null,        // ISO timestamp of the last "visto" mark
+  vistoTram: null,      // dataHora of the newest tramitação at mark time
+  prioritario: false,
+  motivoPrioridade: "",
+  votado: null,         // null = never evaluated; true/false = set (manually or auto)
+  votadoData: null,     // "YYYY-MM-DD"
+  votadoAuto: false,    // true when set by automatic detection
+  relatorDe: null,      // deputy name when added via "Relator" search
+};
+function getMeta(metaMap, id) {
+  return { ...DEFAULT_META, ...((metaMap && metaMap[id]) || {}) };
+}
+
+// ─── Reading windows (08h, 14h, 18h) ─────────────────────────────────
+const READING_WINDOWS = [8, 14, 18];
+function getCurrentReadingWindow(now = new Date()) {
+  const d = new Date(now);
+  let windowHour = null;
+  for (const h of READING_WINDOWS) {
+    if (d.getHours() >= h) windowHour = h;
+  }
+  if (windowHour === null) {
+    // Before 08h: still in yesterday's 18h window
+    const start = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1, 18, 0, 0);
+    return { start, hour: 18, label: "18h (véspera)" };
+  }
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), windowHour, 0, 0);
+  return { start, hour: windowHour, label: `${String(windowHour).padStart(2, "0")}h` };
+}
+// "Visto" applies to the content read: a new tramitação after the mark
+// brings the item back to "não visto" (also covers never-marked items).
+function isProjectUnread(meta, lastTram) {
+  if (!meta || !meta.vistoEm) return true;
+  if (lastTram && lastTram.dataHora) {
+    const ref = meta.vistoTram || meta.vistoEm;
+    if (new Date(lastTram.dataHora).getTime() > new Date(ref).getTime()) return true;
+  }
+  return false;
+}
+
+// ─── Câmara official record URL ──────────────────────────────────────
+function fichaTramitacaoUrl(id) {
+  return `https://www.camara.leg.br/proposicoesWeb/fichadetramitacao?idProposicao=${id}`;
+}
+
+// Label for the "em pauta" badge based on the closest scheduled event
+function pautaBadgeLabel(pautaNotas) {
+  if (!pautaNotas || pautaNotas.length === 0) return null;
+  const next = pautaNotas[0];
+  if (!next.dataHoraInicio) return "Em pauta";
+  const ev = new Date(next.dataHoraInicio);
+  const now = new Date();
+  const diffDays = Math.round(
+    (new Date(ev.getFullYear(), ev.getMonth(), ev.getDate()).getTime() -
+     new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()) / 86400000
+  );
+  if (diffDays <= 0) return "Em pauta hoje";
+  if (diffDays === 1) return "Em pauta amanhã";
+  return `Em pauta ${ev.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })}`;
+}
+
+// ─── Relator extraction from tramitações ─────────────────────────────
+// The API has no reliable direct "relator" field, so we look for the most
+// recent tramitação whose despacho indicates a designation (e.g.
+// "Designado Relator, Dep. Fulano de Tal (PARTIDO-UF)").
+function extractRelator(tramitacoes) {
+  if (!tramitacoes || tramitacoes.length === 0) return null;
+  for (const t of tramitacoes) { // DESC: most recent designation wins
+    const texto = t.despacho || t.descricaoTramitacao || "";
+    if (!/designad[oa]/i.test(texto) || !/relator/i.test(texto)) continue;
+    const m =
+      texto.match(/relator[a]?,?\s*(?:o\s+|a\s+)?dep(?:utad[oa])?\.?\s*([^(.,;]+?)\s*(?:\(([^)]+)\))?\s*[.,;]?\s*$/i) ||
+      texto.match(/dep(?:utad[oa])?\.?\s+([^(.,;]+?)\s*(?:\(([^)]+)\))?\s*[.,;]?\s*$/i);
+    return {
+      nome: m ? m[1].trim() : "(nome não identificado)",
+      partido: m && m[2] ? m[2].trim() : null,
+      orgao: t.siglaOrgao || null,
+      dataDesignacao: t.dataHora || null,
+    };
+  }
+  return null;
+}
+
+// ─── Prazo de emendas em comissão (Art. 119, I, RICD) ────────────────
+// Five sessions counted from the relator designation. Sessions are not
+// calendar days, so the end date shown is an estimate in working days.
+const PRAZO_EMENDAS_SESSOES = 5;
+function addSessionDaysEstimate(dateStr, sessions) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  let added = 0;
+  while (added < sessions) {
+    d.setDate(d.getDate() + 1);
+    const day = d.getDay();
+    if (day !== 0 && day !== 6) added++;
+  }
+  return d;
+}
+
+// ─── Automatic vote detection from tramitações ───────────────────────
+function detectVotacao(tramitacoes) {
+  if (!tramitacoes) return null;
+  const padrao = /(aprovad[oa]\s+(?:o\s+projeto|a\s+proposta|o\s+substitutivo|a\s+emenda|a\s+redaç[aã]o\s+final|em\s+primeiro\s+turno|em\s+segundo\s+turno|em\s+turno\s+único)|transformad[oa]\s+em\s+(?:lei|norma)|votaç[aã]o\s+encerrada|rejeitad[oa]\s+(?:o\s+projeto|a\s+proposta))/i;
+  for (const t of tramitacoes) { // DESC: first hit is the most recent vote
+    const texto = `${t.despacho || ""} ${t.descricaoTramitacao || ""} ${t.descricaoSituacao || ""}`;
+    if (padrao.test(texto)) {
+      return {
+        data: t.dataHora ? String(t.dataHora).slice(0, 10) : null,
+        texto: t.descricaoTramitacao || t.despacho || t.descricaoSituacao || "",
+      };
+    }
+  }
+  return null;
 }
 
 // ─── Demo Mode ─────────────────────────────────────────────────────────
@@ -45,61 +167,61 @@ const MOCK_PROPOSICOES_DB = [
     id: 2120019, siglaTipo: "PL", numero: 1234, ano: 2023,
     ementa: "Dispõe sobre a regulamentação da inteligência artificial no Brasil e estabelece princípios, direitos e deveres para o uso de sistemas de IA.",
     keywords: "inteligência artificial, tecnologia, regulamentação",
-    statusProposicao: { regime: "Urgência", apreciacao: "Plenário", descricaoSituacao: "Aguardando Deliberação", siglaOrgao: "PLEN" },
+    statusProposicao: { regime: "Urgência", apreciacao: "Plenário", descricaoSituacao: "Aguardando Deliberação", siglaOrgao: "PLEN", despacho: "Às Comissões de Ciência, Tecnologia, Comunicação e Informática; Finanças e Tributação; Constituição e Justiça e de Cidadania - Art. 54 RICD" },
   },
   {
     id: 2258616, siglaTipo: "PEC", numero: 45, ano: 2019,
     ementa: "Altera o Sistema Tributário Nacional e dá outras providências — Reforma Tributária.",
     keywords: "reforma tributária, impostos, sistema tributário",
-    statusProposicao: { regime: "Prioridade", apreciacao: "Comissão", descricaoSituacao: "Tramitando em Conjunto", siglaOrgao: "CFT" },
+    statusProposicao: { regime: "Prioridade", apreciacao: "Comissão", descricaoSituacao: "Tramitando em Conjunto", siglaOrgao: "CFT", despacho: "À Comissão de Constituição e Justiça e de Cidadania (Admissibilidade) - Art. 202 RICD" },
   },
   {
     id: 2236340, siglaTipo: "PL", numero: 2630, ano: 2020,
     ementa: "Institui a Lei Brasileira de Liberdade, Responsabilidade e Transparência na Internet (Lei das Fake News).",
     keywords: "fake news, internet, redes sociais, desinformação",
-    statusProposicao: { regime: "Urgência", apreciacao: "Plenário", descricaoSituacao: "Pronta para Pauta", siglaOrgao: "PLEN" },
+    statusProposicao: { regime: "Urgência", apreciacao: "Plenário", descricaoSituacao: "Pronta para Pauta", siglaOrgao: "PLEN", despacho: "Às Comissões de Ciência, Tecnologia, Comunicação e Informática; Constituição e Justiça e de Cidadania - Art. 54 RICD" },
   },
   {
     id: 2284877, siglaTipo: "PL", numero: 3847, ano: 2023,
     ementa: "Altera a Lei nº 8.080/1990 para dispor sobre a telemedicina e a telessaúde no âmbito do SUS.",
     keywords: "telemedicina, telessaúde, SUS, saúde digital",
-    statusProposicao: { regime: "Ordinário", apreciacao: "Comissão com poder conclusivo", descricaoSituacao: "Aguardando Parecer", siglaOrgao: "CSSF" },
+    statusProposicao: { regime: "Ordinário", apreciacao: "Comissão com poder conclusivo", descricaoSituacao: "Aguardando Parecer", siglaOrgao: "CSSF", despacho: "Às Comissões de Seguridade Social e Família; Constituição e Justiça e de Cidadania - Art. 54 RICD" },
   },
   {
     id: 2190752, siglaTipo: "PLP", numero: 68, ano: 2024,
     ementa: "Institui o Imposto sobre Bens e Serviços (IBS), a Contribuição Social sobre Bens e Serviços (CBS) e o Imposto Seletivo (IS).",
     keywords: "IBS, CBS, imposto seletivo, regulamentação tributária",
-    statusProposicao: { regime: "Urgência", apreciacao: "Plenário", descricaoSituacao: "Aguardando Deliberação", siglaOrgao: "PLEN" },
+    statusProposicao: { regime: "Urgência", apreciacao: "Plenário", descricaoSituacao: "Aguardando Deliberação", siglaOrgao: "PLEN", despacho: "Às Comissões de Finanças e Tributação; Constituição e Justiça e de Cidadania - Art. 54 RICD" },
   },
   {
     id: 2350001, siglaTipo: "PL", numero: 528, ano: 2024,
     ementa: "Dispõe sobre o marco regulatório para jogos eletrônicos (games) no Brasil.",
     keywords: "jogos eletrônicos, games, regulamentação",
-    statusProposicao: { regime: "Ordinário", apreciacao: "Comissão", descricaoSituacao: "Aguardando Designação de Relator", siglaOrgao: "CCTCI" },
+    statusProposicao: { regime: "Ordinário", apreciacao: "Comissão", descricaoSituacao: "Aguardando Designação de Relator", siglaOrgao: "CCTCI", despacho: "Às Comissões de Ciência, Tecnologia, Comunicação e Informática; Desenvolvimento Econômico, Indústria, Comércio e Serviços; Finanças e Tributação; Constituição e Justiça e de Cidadania - Art. 54 RICD" },
   },
   {
     id: 2350002, siglaTipo: "PL", numero: 4614, ano: 2024,
     ementa: "Altera a Lei nº 9.394/1996 para incluir a educação socioemocional como componente curricular obrigatório.",
     keywords: "educação socioemocional, currículo escolar, LDB",
-    statusProposicao: { regime: "Prioridade", apreciacao: "Comissão com poder conclusivo", descricaoSituacao: "Aguardando Parecer", siglaOrgao: "CE" },
+    statusProposicao: { regime: "Prioridade", apreciacao: "Comissão com poder conclusivo", descricaoSituacao: "Aguardando Parecer", siglaOrgao: "CE", despacho: "Às Comissões de Educação; Constituição e Justiça e de Cidadania - Art. 54 RICD" },
   },
   {
     id: 2350003, siglaTipo: "PDL", numero: 312, ano: 2023,
     ementa: "Susta a aplicação do Decreto nº 11.615/2023 que regulamenta a Lei nº 10.826/2003 — Estatuto do Desarmamento.",
     keywords: "desarmamento, armas, decreto, sustação",
-    statusProposicao: { regime: "Urgência", apreciacao: "Plenário", descricaoSituacao: "Pronta para Pauta", siglaOrgao: "PLEN" },
+    statusProposicao: { regime: "Urgência", apreciacao: "Plenário", descricaoSituacao: "Pronta para Pauta", siglaOrgao: "PLEN", despacho: "Às Comissões de Segurança Pública e Combate ao Crime Organizado; Constituição e Justiça e de Cidadania - Art. 54 RICD" },
   },
   {
     id: 2350004, siglaTipo: "PL", numero: 1085, ano: 2023,
     ementa: "Regulamenta o exercício da profissão de motorista de aplicativo e estabelece a relação de trabalho com plataformas digitais.",
     keywords: "motorista de aplicativo, plataformas digitais, trabalho",
-    statusProposicao: { regime: "Prioridade", apreciacao: "Comissão", descricaoSituacao: "Tramitando em Conjunto", siglaOrgao: "CTD" },
+    statusProposicao: { regime: "Prioridade", apreciacao: "Comissão", descricaoSituacao: "Tramitando em Conjunto", siglaOrgao: "CTD", despacho: "Às Comissões de Trabalho, de Administração e Serviço Público; Viação e Transportes; Finanças e Tributação; Constituição e Justiça e de Cidadania - Art. 54 RICD" },
   },
   {
     id: 2350005, siglaTipo: "PEC", numero: 9, ano: 2024,
     ementa: "Altera o artigo 37 da Constituição Federal para limitar o número de cargos em comissão na administração pública.",
     keywords: "cargos em comissão, administração pública, reforma administrativa",
-    statusProposicao: { regime: "Ordinário", apreciacao: "Comissão", descricaoSituacao: "Aguardando Admissibilidade", siglaOrgao: "CCJC" },
+    statusProposicao: { regime: "Ordinário", apreciacao: "Comissão", descricaoSituacao: "Aguardando Admissibilidade", siglaOrgao: "CCJC", despacho: "À Comissão de Constituição e Justiça e de Cidadania (Admissibilidade) - Art. 202 RICD" },
   },
 ];
 
@@ -209,7 +331,7 @@ async function getProposicoesByDeputado(deputadoId, role = "autor", pagina = 1) 
     return { dados, links: [] };
   }
   const params = {
-    ordem: "DESC", ordenarPor: "id", itens: 100, pagina,
+    ordem: "DESC", ordenarPor: "id", itens: 500, pagina,
   };
   if (role === "autor") params.idDeputadoAutor = deputadoId;
   else params.idDeputadoAutor = deputadoId;
@@ -304,6 +426,52 @@ const MOCK_RELACIONADAS = {
     { id: 9990045, siglaTipo: "RPD", numero: 1, ano: 2024, ementa: "Redação para o segundo turno de votação do PLP 68/2024.", codTipoTramitacao: "920" },
   ],
 };
+
+// ─── Eventos legislativos / Pauta (reuniões de comissão e Plenário) ────
+function mockDataHora(daysFromNow, hour) {
+  const d = new Date();
+  d.setDate(d.getDate() + daysFromNow);
+  d.setHours(hour, 0, 0, 0);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function makeMockEventos() {
+  return [
+    { id: 70001, dataHoraInicio: mockDataHora(0, 10), situacao: "Convocada", descricaoTipo: "Sessão Deliberativa", orgaos: [{ sigla: "PLEN", nome: "Plenário" }] },
+    { id: 70002, dataHoraInicio: mockDataHora(1, 14), situacao: "Convocada", descricaoTipo: "Reunião Deliberativa", orgaos: [{ sigla: "CFT", nome: "Comissão de Finanças e Tributação" }] },
+    { id: 70003, dataHoraInicio: mockDataHora(3, 9), situacao: "Convocada", descricaoTipo: "Reunião Deliberativa", orgaos: [{ sigla: "CCJC", nome: "Comissão de Constituição e Justiça e de Cidadania" }] },
+  ];
+}
+const MOCK_EVENTO_PAUTA = {
+  70001: [
+    { ordem: 1, topico: "Ordem do Dia", regime: "Urgência (Art. 155, RICD)", titulo: "Discussão, em turno único, do PL 1234/2023", proposicao_: { id: 2120019, siglaTipo: "PL", numero: 1234, ano: 2023 }, relator: null },
+    { ordem: 2, topico: "Ordem do Dia", regime: "Urgência", titulo: "Votação do PDL 312/2023 — sustação de decreto", proposicao_: { id: 2350003, siglaTipo: "PDL", numero: 312, ano: 2023 }, relator: null },
+  ],
+  70002: [
+    { ordem: 1, topico: "Deliberação de parecer", regime: "Urgência", titulo: "Votação do parecer do relator ao PLP 68/2024", proposicao_: { id: 2190752, siglaTipo: "PLP", numero: 68, ano: 2024 }, relator: { nome: "Adriana Ventura" } },
+  ],
+  70003: [
+    { ordem: 1, topico: "Admissibilidade", regime: "Especial", titulo: "Apreciação da admissibilidade da PEC 9/2024", proposicao_: { id: 2350005, siglaTipo: "PEC", numero: 9, ano: 2024 }, relator: null },
+  ],
+};
+
+async function getEventos(dataInicio, dataFim) {
+  if (DEMO_MODE) {
+    return makeMockEventos();
+  }
+  const data = await apiFetch("/eventos", {
+    dataInicio, dataFim, itens: 100, ordem: "ASC", ordenarPor: "dataHoraInicio",
+  });
+  return data.dados || [];
+}
+
+async function getEventoPauta(eventoId) {
+  if (DEMO_MODE) {
+    return MOCK_EVENTO_PAUTA[eventoId] || [];
+  }
+  const data = await apiFetch(`/eventos/${eventoId}/pauta`);
+  return data.dados || [];
+}
 
 async function getRelacionadas(id) {
   if (DEMO_MODE) {
@@ -424,6 +592,18 @@ const REGIMENTO_INTERNO = {
     "CDC": { nome: "Comissão de Defesa do Consumidor", descricao: "Competente para matérias de defesa do consumidor e do contribuinte." },
     "CME": { nome: "Comissão de Minas e Energia", descricao: "Competente para matérias de exploração mineral, recursos hídricos e energéticos." },
     "CREDN": { nome: "Comissão de Relações Exteriores e de Defesa Nacional", descricao: "Competente para matérias de política externa e defesa nacional." },
+    "CAPADR": { nome: "Comissão de Agricultura, Pecuária, Abastecimento e Desenvolvimento Rural", descricao: "Competente para matérias de política agrícola, agrária e de abastecimento." },
+    "CDU": { nome: "Comissão de Desenvolvimento Urbano", descricao: "Competente para matérias de política urbana, habitação e transporte urbano." },
+    "CDHM": { nome: "Comissão de Direitos Humanos e Minorias", descricao: "Competente para matérias de direitos humanos e proteção de minorias." },
+    "CMADS": { nome: "Comissão de Meio Ambiente e Desenvolvimento Sustentável", descricao: "Competente para matérias de meio ambiente, recursos naturais e desenvolvimento sustentável." },
+    "CVT": { nome: "Comissão de Viação e Transportes", descricao: "Competente para matérias de transporte e infraestrutura viária." },
+    "CDEICS": { nome: "Comissão de Desenvolvimento Econômico, Indústria, Comércio e Serviços", descricao: "Competente para matérias de política industrial, comercial e de serviços." },
+    "CSPCCO": { nome: "Comissão de Segurança Pública e Combate ao Crime Organizado", descricao: "Competente para matérias de segurança pública e combate ao crime organizado." },
+    "CINDRA": { nome: "Comissão de Integração Nacional, Desenvolvimento Regional e da Amazônia", descricao: "Competente para matérias de desenvolvimento regional e integração." },
+    "CCULT": { nome: "Comissão de Cultura", descricao: "Competente para matérias de política cultural e patrimônio cultural." },
+    "CLP": { nome: "Comissão de Legislação Participativa", descricao: "Recebe e processa sugestões legislativas da sociedade civil." },
+    "CFFC": { nome: "Comissão de Fiscalização Financeira e Controle", descricao: "Competente para matérias de fiscalização contábil, financeira e orçamentária." },
+    "CTASP": { nome: "Comissão de Trabalho, Administração e Serviço Público", descricao: "Competente para matérias de relações de trabalho e serviço público." },
   },
   tiposProposicao: {
     "PL": { nome: "Projeto de Lei Ordinária", descricao: "Proposta de lei que exige maioria simples para aprovação (Art. 47 CF).", tramitacao: "Pode ser apreciado em regime ordinário, de prioridade ou de urgência." },
@@ -431,7 +611,11 @@ const REGIMENTO_INTERNO = {
     "PEC": { nome: "Proposta de Emenda à Constituição", descricao: "Modifica o texto constitucional. Exige 3/5 dos votos em dois turnos (Art. 60 CF).", tramitacao: "Tramita em Comissão Especial com 40 sessões, depois Plenário em dois turnos." },
     "MPV": { nome: "Medida Provisória", descricao: "Ato do Presidente com força de lei imediata, para casos de relevância e urgência (Art. 62 CF).", tramitacao: "Vigência de 60 dias, prorrogáveis por mais 60. Comissão Mista e depois cada Casa." },
     "PDL": { nome: "Projeto de Decreto Legislativo", descricao: "Competência exclusiva do Congresso (Art. 49 CF). Não depende de sanção presidencial.", tramitacao: "Aprovado por maioria simples, sem sanção do Executivo." },
+    "PDC": { nome: "Projeto de Decreto Legislativo (sigla anterior a 2019)", descricao: "Mesma natureza do PDL: matéria de competência exclusiva do Congresso (Art. 49 CF), sem sanção presidencial.", tramitacao: "Aprovado por maioria simples, sem sanção do Executivo." },
     "PRC": { nome: "Projeto de Resolução da Câmara", descricao: "Regula matérias de competência privativa da Câmara dos Deputados.", tramitacao: "Tramitação interna à Câmara." },
+    "PLV": { nome: "Projeto de Lei de Conversão", descricao: "Texto alternativo aprovado para converter Medida Provisória em lei com alterações (Art. 62, §12 CF).", tramitacao: "Tramita vinculado à MPV correspondente, com os mesmos prazos constitucionais." },
+    "PLN": { nome: "Projeto de Lei do Congresso Nacional", descricao: "Projetos de natureza orçamentária (PPA, LDO, LOA e créditos adicionais) apreciados pelo Congresso Nacional.", tramitacao: "Tramita na Comissão Mista de Planos, Orçamentos Públicos e Fiscalização (CMO) e em sessão conjunta do Congresso." },
+    "MSC": { nome: "Mensagem", descricao: "Comunicação oficial do Poder Executivo ao Congresso Nacional (envio de proposições, vetos, indicações de autoridades, acordos internacionais).", tramitacao: "Processamento conforme o conteúdo: distribuição às comissões competentes ou leitura em Plenário." },
     "REQ": { nome: "Requerimento", descricao: "Solicitação feita por deputado ou comissão para deliberação do Plenário ou de comissão.", tramitacao: "Apreciação imediata ou na sessão seguinte." },
     "RIC": { nome: "Requerimento de Informação", descricao: "Pedido de informações a Ministro de Estado ou autoridades (Art. 50, §2º CF).", tramitacao: "Prazo de 30 dias para resposta." },
   },
@@ -534,6 +718,23 @@ const REGIMENTO_INTERNO = {
       interpretacao: "Votos em separado sinalizam divisão dentro da comissão. Se muitos, indicam que o parecer do relator não tem consenso.",
     },
   },
+  areasTematicas: {
+    "Economia e Tributação": ["CFT", "CDEICS", "CME", "CAPADR"],
+    "Direito e Justiça": ["CCJC", "CDC", "CSPCCO"],
+    "Saúde e Previdência": ["CSSF"],
+    "Educação e Cultura": ["CE", "CCULT"],
+    "Trabalho e Serviço Público": ["CTD", "CTASP"],
+    "Ciência e Tecnologia": ["CCTCI"],
+    "Defesa e Segurança": ["CREDN", "CSPCCO"],
+    "Meio Ambiente": ["CMADS"],
+    "Infraestrutura e Transportes": ["CVT", "CDU", "CINDRA"],
+    "Administração Pública": ["CTASP", "MESA"],
+    "Direitos Humanos": ["CDHM"],
+    "Política e Eleições": ["CCJC"],
+    "Agricultura e Pecuária": ["CAPADR"],
+    "Relações Exteriores": ["CREDN"],
+    "Minas e Energia": ["CME"],
+  },
   situacoes: {
     "Aguardando Deliberação": "A proposição está na Ordem do Dia, pronta para ser votada quando for incluída na pauta.",
     "Pronta para Pauta": "O parecer foi aprovado nas comissões e a matéria está pronta para inclusão na Ordem do Dia.",
@@ -578,7 +779,8 @@ function inferStage(status, tramitacoes) {
 }
 
 // ─── Strategic Recommendation Engine ────────────────────────────────────
-// Suggests the best procedural measure to accelerate a project based on RICD
+// Deep analysis based on the Regimento Interno da Câmara dos Deputados (RICD)
+// Proposes next strategic steps based on the latest movement/dispatch
 function getStrategicRecommendation(project, tramitacoes) {
   const status = project.statusProposicao || {};
   const regime = (status.regime || "").toLowerCase();
@@ -586,126 +788,410 @@ function getStrategicRecommendation(project, tramitacoes) {
   const orgao = (status.siglaOrgao || "").toUpperCase();
   const tipo = (project.siglaTipo || "").toUpperCase();
   const stage = inferStage(status, tramitacoes);
+  const apreciacao = (status.apreciacao || "").toLowerCase();
+
+  // Analyze last tramitação for context
+  const lastTram = tramitacoes && tramitacoes.length > 0 ? tramitacoes[0] : null;
+  const lastDesc = lastTram ? (lastTram.descricaoTramitacao || "").toLowerCase() : "";
+  const lastSit = lastTram ? (lastTram.descricaoSituacao || "").toLowerCase() : "";
+
+  // Calculate time since last movement (days)
+  const daysSinceLastMovement = lastTram && lastTram.dataHora
+    ? Math.floor((Date.now() - new Date(lastTram.dataHora).getTime()) / (1000 * 60 * 60 * 24))
+    : null;
 
   const recommendations = [];
 
-  // If not yet in urgency, suggest requesting it
-  if (!regime.includes("urgência") && !regime.includes("urgencia") && tipo !== "PEC") {
+  // ── 1. ANÁLISE BASEADA NO ÚLTIMO DESPACHO/ANDAMENTO ──
+
+  // 1.1 Projeto recém-apresentado
+  if (lastSit.includes("apresenta") || stage === "apresentacao") {
     recommendations.push({
       prioridade: 1,
-      acao: "Requerer Urgência",
-      base: "Art. 153 e 154 RICD",
-      descricao: "Apresentar requerimento de urgência assinado por maioria absoluta dos Deputados ou líderes que representem esse número. Dispensa interstícios e inclui a matéria imediatamente na Ordem do Dia.",
+      acao: "Requerer despacho inicial da Mesa",
+      base: "Art. 137 e 139 RICD",
+      descricao: "A proposição foi apresentada e aguarda despacho da Mesa Diretora para distribuição às comissões. O autor pode requerer ao Presidente que apresse o despacho, especialmente se o prazo de 2 sessões já foi ultrapassado (Art. 137, §1º). Verificar se o projeto deve ser distribuído a mais de 3 comissões, caso em que será criada comissão especial (Art. 34, II).",
+      impacto: "alto",
+    });
+  }
+
+  // 1.2 Despacho feito — distribuído às comissões
+  if (lastSit.includes("despacho") || (stage === "despacho" && lastDesc.includes("comiss"))) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Verificar distribuição e requerer redistribuição se necessário",
+      base: "Art. 139, 141 e 34, II RICD",
+      descricao: "O projeto foi despachado às comissões. Verificar: (1) se todas as comissões competentes foram incluídas; (2) se a distribuição a mais de 3 comissões não exige criação de comissão especial; (3) se a competência está correta. Se houver erro, requerer redistribuição (Art. 141, §2º). Se o despacho for a comissões com poder conclusivo, verificar se isso favorece ou prejudica.",
       impacto: "alto",
     });
     recommendations.push({
       prioridade: 2,
-      acao: "Requerer Urgência Urgentíssima",
-      base: "Art. 155 RICD",
-      descricao: "Se aprovado por 2/3 dos membros da Casa ou líderes que representem esse número, permite incluir a matéria na Ordem do Dia para discussão e votação imediata.",
+      acao: "Solicitar designação célere de relator",
+      base: "Art. 39, I e 41 RICD",
+      descricao: "O presidente de cada comissão designa o relator. Articular com o presidente para designação na próxima reunião. O relator terá 10 sessões (ordinário), 5 sessões (prioridade/urgência) para apresentar parecer (Art. 52).",
+      impacto: "alto",
+    });
+  }
+
+  // 1.3 Aguardando designação de relator
+  if (sit.includes("designação de relator") || sit.includes("designacao de relator") || lastSit.includes("designação") || lastSit.includes("designacao")) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Articular com Presidente da Comissão para designação imediata",
+      base: "Art. 39, I e 41 RICD",
+      descricao: "A comissão recebeu a matéria mas o relator não foi designado. O Presidente da Comissão deve designar relator (Art. 39, I). Articular para que um deputado favorável ao projeto seja indicado como relator. Se houver demora injustificada, levar ao Presidente da Câmara.",
+      impacto: "alto",
+    });
+    if (daysSinceLastMovement && daysSinceLastMovement > 30) {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Cobrar andamento — projeto parado há " + daysSinceLastMovement + " dias",
+        base: "Art. 52, §6º RICD",
+        descricao: "A matéria está sem movimentação há mais de 30 dias. Os autores ou líderes podem solicitar providências ao Presidente da Comissão. Se a inação persistir, requerer urgência para destravar (Art. 153 RICD).",
+        impacto: "muito alto",
+      });
+    }
+  }
+
+  // 1.4 Relator designado — aguardando parecer
+  if (sit.includes("aguardando parecer") || (lastDesc.includes("designad") && lastDesc.includes("relator"))) {
+    const prazoRelator = regime.includes("urgência") || regime.includes("urgencia") || regime.includes("prioridade") ? 5 : 10;
+    recommendations.push({
+      prioridade: 1,
+      acao: "Monitorar prazo do Relator (" + prazoRelator + " sessões)",
+      base: "Art. 52 RICD",
+      descricao: `O relator tem prazo de ${prazoRelator} sessões para apresentar parecer. Esgotado o prazo sem apresentação, qualquer membro pode requerer novo relator (Art. 52, §3º). O relator pode pedir prorrogação por metade do período (Art. 52, §1º). Articular diretamente com o relator oferecendo subsídios técnicos.`,
+      impacto: "alto",
+    });
+    if (daysSinceLastMovement && daysSinceLastMovement > 20) {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Requerer substituição do Relator por estouro de prazo",
+        base: "Art. 52, §3º RICD",
+        descricao: "O prazo do relator já deve ter sido ultrapassado (projeto sem movimentação há " + daysSinceLastMovement + " dias). Qualquer membro da comissão pode requerer designação de novo relator ao Presidente da Comissão.",
+        impacto: "muito alto",
+      });
+    }
+  }
+
+  // 1.5 Parecer apresentado/aprovado
+  if (sit.includes("parecer") || lastSit.includes("parecer")) {
+    if (sit.includes("parecer aprovado") || lastDesc.includes("parecer aprovado") || lastDesc.includes("aprovação do parecer")) {
+      if (apreciacao.includes("conclusivo")) {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Monitorar prazo de recurso ao Plenário (5 sessões)",
+          base: "Art. 132, §2º RICD",
+          descricao: "Com parecer aprovado em regime conclusivo, a matéria será considerada aprovada se não houver recurso de 1/10 dos membros (52 deputados) em 5 sessões. Se o objetivo é acelerar, evitar controvérsias. Se quer levar ao Plenário, articular 52 assinaturas.",
+          impacto: "alto",
+        });
+      } else {
+        recommendations.push({
+          prioridade: 1,
+          acao: "Requerer inclusão na Ordem do Dia do Plenário",
+          base: "Art. 17, I, s e Art. 83 RICD",
+          descricao: "Parecer aprovado na(s) comissão(ões). Solicitar ao Presidente e ao Colégio de Líderes (Art. 20) a inclusão na pauta da próxima sessão deliberativa. Em regime de urgência, a inclusão é automática (Art. 152, §2º).",
+          impacto: "alto",
+        });
+      }
+    } else {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Requerer votação do parecer na Comissão",
+        base: "Art. 47, §2º RICD",
+        descricao: "O relator apresentou parecer que ainda não foi votado pela comissão. Solicitar inclusão na pauta da próxima reunião deliberativa. O parecer deve ser publicado 2 sessões antes da votação (Art. 130, §2º), salvo urgência.",
+        impacto: "alto",
+      });
+    }
+  }
+
+  // 1.6 Pronta para pauta / Ordem do Dia
+  if (sit.includes("pronta para pauta") || sit.includes("ordem do dia") || lastSit.includes("pronta para pauta")) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Articular com Colégio de Líderes para inclusão na pauta",
+      base: "Art. 17, I, s e Art. 20 RICD",
+      descricao: "A matéria está pronta mas depende de inclusão na Ordem do Dia pelo Presidente, ouvido o Colégio de Líderes. Articular com líderes partidários. Se já na Ordem do Dia, verificar risco de adiamento (Art. 177).",
+      impacto: "alto",
+    });
+    recommendations.push({
+      prioridade: 2,
+      acao: "Requerer preferência na votação",
+      base: "Art. 159 e 160 RICD",
+      descricao: "Se na Ordem do Dia com muitas matérias à frente, requerer preferência (Art. 159) ou inversão de pauta (Art. 160). Requer aprovação do Plenário por maioria simples.",
+      impacto: "médio",
+    });
+    if (daysSinceLastMovement && daysSinceLastMovement > 60) {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Requerer urgência para destravar votação parada há " + daysSinceLastMovement + " dias",
+        base: "Art. 153 e 154 RICD",
+        descricao: "A matéria está pronta para votação mas não é incluída na pauta há mais de 60 dias. Requerer urgência para forçar inclusão na Ordem do Dia automaticamente.",
+        impacto: "muito alto",
+      });
+    }
+  }
+
+  // 1.7 Aguardando deliberação em Plenário
+  if (sit.includes("deliberaç") || sit.includes("deliberac") || (orgao === "PLEN" && stage === "votacao")) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Preparar estratégia de votação em Plenário",
+      base: "Art. 184 a 188 RICD",
+      descricao: "A matéria será votada em Plenário. Ações: (1) articular base de apoio para quórum; (2) coordenar posição sobre emendas de plenário (Art. 120); (3) preparar contra obstrução, verificação de votação (Art. 185), votação nominal (Art. 186); (4) defender dispositivos destacados (Art. 161); (5) atentar para requerimento de adiamento (Art. 177, §2º).",
+      impacto: "alto",
+    });
+  }
+
+  // ── 2. ANÁLISE POR TIPO DE PROPOSIÇÃO ──
+
+  if (tipo === "PEC") {
+    if (sit.includes("admissibilidade") || orgao === "CCJC") {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Acompanhar admissibilidade na CCJC (prazo de 5 sessões)",
+        base: "Art. 202, caput RICD",
+        descricao: "A CCJC deve se pronunciar sobre admissibilidade em 5 sessões. Verificar: (1) cláusulas pétreas (Art. 60, §4º CF); (2) limitações circunstanciais; (3) requisitos formais (1/3 de assinaturas). Se inadmitida, cabe recurso ao Plenário por 1/10 dos membros.",
+        impacto: "muito alto",
+      });
+    }
+    if (lastDesc.includes("admitida") || lastDesc.includes("comissão especial") || lastSit.includes("comissão especial")) {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Monitorar Comissão Especial (prazo de 40 sessões)",
+        base: "Art. 202, §2º a §4º RICD",
+        descricao: "Após admissão, Comissão Especial examina o mérito (40 sessões). Ações: (1) articular membros e relator favorável; (2) requerer audiências públicas para construir consenso; (3) esgotado prazo sem parecer, Presidente pode dar 10 sessões improrrogáveis (Art. 52, §6º).",
+        impacto: "alto",
+      });
+    }
+    if (stage === "votacao" || sit.includes("deliberaç") || sit.includes("deliberac")) {
+      recommendations.push({
+        prioridade: 1,
+        acao: "Garantir quórum de 3/5 em dois turnos",
+        base: "Art. 60, §2º CF e Art. 202, §6º e §7º RICD",
+        descricao: "PEC exige 3/5 (308 votos) em dois turnos, interstício mínimo de 5 sessões, votação nominal. Mapear 308 votos favoráveis. No 2º turno, emendas supressivas são admitidas.",
+        impacto: "muito alto",
+      });
+    }
+  }
+
+  if (tipo === "PLP" && (stage === "votacao" || sit.includes("deliberaç") || sit.includes("deliberac"))) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Garantir maioria absoluta (257 votos)",
+      base: "Art. 69 CF e Art. 183, §3º RICD",
+      descricao: "PLP exige maioria absoluta (257 votos a favor). Votação nominal. PLP não admite poder conclusivo das comissões (Art. 24, II). Articular presença e orientação de bancada.",
       impacto: "muito alto",
     });
   }
 
-  // Stage-specific recommendations
-  if (stage === "apresentacao" || stage === "despacho") {
-    recommendations.push({
-      prioridade: 3,
-      acao: "Acompanhar distribuição às Comissões",
-      base: "Art. 139 RICD",
-      descricao: "Verificar se o despacho da Mesa distribuiu a matéria às comissões adequadas. Pode-se requerer redistribuição se houver erro (Art. 141).",
-      impacto: "médio",
-    });
-  }
-
-  if (stage === "comissoes") {
-    if (sit.includes("relator")) {
-      recommendations.push({
-        prioridade: 1,
-        acao: "Solicitar celeridade ao Relator",
-        base: "Art. 52 RICD",
-        descricao: "O relator tem prazo de 10 sessões (ordinário) ou 5 sessões (urgência/prioridade) para apresentar parecer. Esgotado o prazo, pode-se requerer a designação de novo relator.",
-        impacto: "alto",
-      });
-    }
-    if (sit.includes("parecer")) {
-      recommendations.push({
-        prioridade: 1,
-        acao: "Requerer inclusão na pauta da Comissão",
-        base: "Art. 47 RICD",
-        descricao: "Solicitar ao Presidente da Comissão a inclusão imediata da matéria na pauta de reunião para votação do parecer.",
-        impacto: "alto",
-      });
-    }
-    recommendations.push({
-      prioridade: 4,
-      acao: "Requerer audiência pública",
-      base: "Art. 255 a 258 RICD",
-      descricao: "Audiência pública pode dar visibilidade e pressão política para a tramitação, embora possa adicionar tempo ao processo.",
-      impacto: "médio",
-    });
-  }
-
-  if (stage === "plenario" || sit.includes("pronta para pauta") || sit.includes("ordem do dia")) {
+  if (tipo === "MPV") {
     recommendations.push({
       prioridade: 1,
-      acao: "Solicitar inclusão na Ordem do Dia",
-      base: "Art. 17, I, s RICD",
-      descricao: "Solicitar ao Presidente da Câmara a inclusão da matéria na Ordem do Dia. Em regime de urgência, a inclusão é automática.",
-      impacto: "alto",
-    });
-    recommendations.push({
-      prioridade: 3,
-      acao: "Requerer preferência na votação",
-      base: "Art. 160 RICD",
-      descricao: "Requerimento para que a matéria seja discutida e votada antes das demais da Ordem do Dia.",
-      impacto: "médio",
+      acao: "Monitorar prazo constitucional de 60+60 dias",
+      base: "Art. 62, §§3º a 7º CF",
+      descricao: "MPV tem prazo de 60 dias prorrogáveis por mais 60. Se não votada em 45 dias, tranca a pauta. Acompanhar Comissão Mista. Se perder eficácia, o Congresso disciplina relações jurídicas por decreto legislativo em 60 dias.",
+      impacto: "muito alto",
     });
   }
 
-  if (sit.includes("conjunto") || sit.includes("apensad")) {
+  if (tipo === "PDL" && (lastDesc.includes("sustação") || lastDesc.includes("susta"))) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Articular votação de sustação antes da consolidação do ato",
+      base: "Art. 49, V CF",
+      descricao: "PDL de sustação só tem eficácia após aprovação. Quanto mais tempo o decreto vigorar, mais difícil será a sustação política. Articular votação célere. Efeito ex nunc (não retroativo).",
+      impacto: "alto",
+    });
+  }
+
+  // ── 3. REGIME DE TRAMITAÇÃO ──
+
+  if (!regime.includes("urgência") && !regime.includes("urgencia") && tipo !== "PEC" && tipo !== "MPV" && stage !== "sancao" && stage !== "revisao") {
     recommendations.push({
       prioridade: 2,
-      acao: "Verificar proposição principal",
+      acao: "Requerer Urgência para acelerar tramitação",
+      base: "Art. 153 e 154 RICD",
+      descricao: "Requerer urgência por maioria absoluta (257) ou líderes. Efeitos: dispensa interstícios, inclusão automática na Ordem do Dia, parecer em Plenário (Art. 154, II), prazo de emendas de 2 horas (Art. 120, §4º). Urgência urgentíssima (Art. 155) com 2/3 permite votação imediata.",
+      impacto: "alto",
+    });
+  }
+
+  // ── 4. SITUAÇÕES ESPECIAIS ──
+
+  if (sit.includes("conjunto") || sit.includes("apensad") || lastDesc.includes("apens")) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Avaliar apensação — verificar projeto principal ou requerer desapensação",
       base: "Art. 142 e 143 RICD",
-      descricao: "Quando proposições tramitam em conjunto, o andamento depende da proposição principal (mais antiga). Acompanhar a tramitação da principal para prever o andamento.",
-      impacto: "médio",
-    });
-    recommendations.push({
-      prioridade: 3,
-      acao: "Requerer desapensação",
-      base: "Art. 142, §1º RICD",
-      descricao: "Se as proposições não são semelhantes ou se a apensação prejudica a tramitação, pode-se requerer a desapensação.",
-      impacto: "médio",
-    });
-  }
-
-  // PEC-specific
-  if (tipo === "PEC") {
-    if (stage === "comissoes" || sit.includes("admissibilidade")) {
-      recommendations.push({
-        prioridade: 1,
-        acao: "Acompanhar admissibilidade na CCJC",
-        base: "Art. 202 RICD",
-        descricao: "PEC precisa ser admitida pela CCJC antes de ir à Comissão Especial. Prazo de 5 sessões para o relator na CCJC.",
-        impacto: "alto",
-      });
-    }
-    recommendations.push({
-      prioridade: 2,
-      acao: "Monitorar Comissão Especial",
-      base: "Art. 202, §2º RICD",
-      descricao: "Após admissibilidade, deve ser criada Comissão Especial com prazo de 40 sessões para proferir parecer.",
+      descricao: "O projeto tramita apensado a outro. O andamento depende da proposição principal (mais antiga). Se a apensação prejudica (projeto principal abandonado, relator contrário), requerer desapensação (Art. 142, §1º). Se a principal é favorável, a apensação pode acelerar.",
       impacto: "alto",
     });
   }
 
-  // Sort by priority
+  if (lastDesc.includes("audiência pública") || lastDesc.includes("audiencia publica")) {
+    recommendations.push({
+      prioridade: 2,
+      acao: "Participar da audiência pública e indicar especialistas favoráveis",
+      base: "Art. 255 a 258 RICD",
+      descricao: "Audiência pública sobre esta matéria. Indicar especialistas favoráveis. Cada bloco pode indicar convidados. Oportunidade de construir consenso e pressionar pela aprovação.",
+      impacto: "médio",
+    });
+  }
+
+  if (lastDesc.includes("substitutivo") || lastDesc.includes("emenda")) {
+    recommendations.push({
+      prioridade: 2,
+      acao: "Analisar alterações e avaliar estratégia de emendamento",
+      base: "Art. 118 a 125 RICD",
+      descricao: "Emendas ou substitutivo apresentados. Avaliar se alteram substancialmente o projeto. Apresentar emendas corretivas se necessário. Requerer destaque (Art. 161) para votar separadamente artigos controversos.",
+      impacto: "médio",
+    });
+  }
+
+  if (lastDesc.includes("recurso")) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Acompanhar recurso — pode alterar o foro de deliberação",
+      base: "Art. 132, §2º e Art. 58, §2º, I CF",
+      descricao: "Recurso interposto, possivelmente contra poder conclusivo. Se tiver 52 assinaturas válidas, a matéria vai ao Plenário. Pode atrasar ou acelerar conforme o contexto político.",
+      impacto: "alto",
+    });
+  }
+
+  if (sit.includes("arquivad") || lastSit.includes("arquivad")) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Requerer desarquivamento",
+      base: "Art. 105 RICD",
+      descricao: "Proposição arquivada, provavelmente por fim de legislatura. Desarquivamento: pelo autor (180 dias do início da legislatura) ou 1/3 dos membros/líderes. Se arquivada por rejeição, reapresentação na mesma sessão exige maioria absoluta (Art. 67 CF).",
+      impacto: "muito alto",
+    });
+  }
+
+  if (sit.includes("senado") || sit.includes("revis") || stage === "revisao") {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Acompanhar tramitação no Senado (Casa Revisora)",
+      base: "Art. 65 CF",
+      descricao: "Aprovado pela Câmara, enviado ao Senado. Se aprovado sem alterações, vai à sanção. Se emendado, retorna à Câmara apenas para apreciar as emendas (Art. 65, parágrafo único). Se rejeitado, é arquivado. Articular com senadores para aprovação sem emendas.",
+      impacto: "alto",
+    });
+  }
+
+  if (sit.includes("veto") || lastDesc.includes("veto")) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Articular derrubada do veto no Congresso",
+      base: "Art. 66, §4º CF",
+      descricao: "O Presidente vetou o projeto. Derrubada exige maioria absoluta de cada Casa (257 deputados + 41 senadores) em sessão conjunta, dentro de 30 dias. Se não apreciado em 30 dias, tranca a pauta do Congresso.",
+      impacto: "muito alto",
+    });
+  } else if (sit.includes("sancion") || sit.includes("sanção")) {
+    recommendations.push({
+      prioridade: 1,
+      acao: "Acompanhar sanção e publicação no Diário Oficial",
+      base: "Art. 66, §§1º e 7º CF",
+      descricao: "Enviado à sanção presidencial. O Presidente tem 15 dias úteis para sancionar ou vetar. Articular com Governo pela sanção integral. Após sanção, acompanhar publicação e vacatio legis.",
+      impacto: "médio",
+    });
+  }
+
+  // ── 5. ALERTA DE INATIVIDADE ──
+  if (daysSinceLastMovement && daysSinceLastMovement > 90 && stage !== "sancao" && stage !== "revisao") {
+    recommendations.push({
+      prioridade: 1,
+      acao: "ALERTA: Projeto sem movimentação há " + daysSinceLastMovement + " dias",
+      base: "Art. 52, §6º e Art. 153 RICD",
+      descricao: "Parado há mais de 90 dias. Medidas emergenciais: requerer urgência (Art. 153), substituir relator por inação (Art. 52, §3º), solicitar providências ao Presidente (Art. 17, I). Atentar para risco de arquivamento por fim de legislatura (Art. 105).",
+      impacto: "muito alto",
+    });
+  } else if (daysSinceLastMovement && daysSinceLastMovement > 45 && stage !== "sancao" && stage !== "revisao" && !recommendations.some((r) => r.acao.includes("parado") || r.acao.includes("ALERTA"))) {
+    recommendations.push({
+      prioridade: 2,
+      acao: "Atenção: Projeto sem movimentação há " + daysSinceLastMovement + " dias",
+      base: "Art. 52, §§ RICD",
+      descricao: "Mais de 45 dias sem andamento. Verificar se há impedimento processual ou inação política. Articular com membros da comissão ou líderes para retomada.",
+      impacto: "alto",
+    });
+  }
+
+  // Sort by priority, deduplicate and return top 5
   recommendations.sort((a, b) => a.prioridade - b.prioridade);
-  return recommendations.slice(0, 3); // Return top 3
+  const seen = new Set();
+  const unique = recommendations.filter((r) => {
+    if (seen.has(r.acao)) return false;
+    seen.add(r.acao);
+    return true;
+  });
+  return unique.slice(0, 5);
 }
 
 // Describe current rite/procedure the project will follow
+// ─── Committee name-to-sigla mapping for despacho parsing ─────────
+const COMISSAO_NOME_SIGLA = {
+  "constituição e justiça": "CCJC", "constituição, justiça": "CCJC", "constituição e justiça e de cidadania": "CCJC",
+  "finanças e tributação": "CFT", "finanças": "CFT",
+  "educação": "CE", "educação e cultura": "CE",
+  "saúde": "CSSF", "seguridade social": "CSSF", "seguridade social e família": "CSSF",
+  "ciência e tecnologia": "CCTCI", "ciência, tecnologia": "CCTCI", "ciência, tecnologia, comunicação e informática": "CCTCI",
+  "trabalho": "CTD", "trabalho, administração e serviço público": "CTD", "trabalho, de administração e serviço público": "CTD",
+  "defesa do consumidor": "CDC",
+  "minas e energia": "CME",
+  "relações exteriores": "CREDN", "relações exteriores e de defesa nacional": "CREDN",
+  "agricultura": "CAPADR", "agricultura, pecuária": "CAPADR", "agricultura, pecuária, abastecimento e desenvolvimento rural": "CAPADR",
+  "desenvolvimento urbano": "CDU",
+  "direitos humanos": "CDHM", "direitos humanos e minorias": "CDHM",
+  "meio ambiente": "CMADS", "meio ambiente e desenvolvimento sustentável": "CMADS",
+  "viação e transportes": "CVT",
+  "cultura": "CCULT",
+  "desporto": "CESPO", "esporte": "CESPO",
+  "desenvolvimento econômico": "CDEICS", "desenvolvimento econômico, indústria": "CDEICS", "indústria, comércio e serviços": "CDEICS", "desenvolvimento econômico, indústria, comércio e serviços": "CDEICS",
+  "integração nacional": "CINDRA", "integração nacional, desenvolvimento regional": "CINDRA",
+  "legislação participativa": "CLP",
+  "segurança pública": "CSPCCO", "segurança pública e combate ao crime organizado": "CSPCCO",
+  "defesa dos direitos da pessoa idosa": "CIDOSO",
+  "defesa dos direitos da mulher": "CMULHER",
+  "defesa dos direitos das pessoas com deficiência": "CPD",
+  "fiscalização financeira e controle": "CFFC",
+  "turismo": "CTUR",
+  "comissão especial": "CE_ESP",
+  "comissão mista": "CM",
+};
+
+function extractComissoesFromDespacho(despachoText) {
+  if (!despachoText) return [];
+  const text = despachoText.toLowerCase();
+  const found = [];
+  const siglasSeen = new Set();
+
+  // Try to find direct sigla mentions like "CCJC", "CFT" etc
+  const siglaRegex = /\b(CCJC|CFT|CE|CSSF|CCTCI|CTD|CDC|CME|CREDN|CAPADR|CDU|CDHM|CMADS|CVT|CCULT|CESPO|CDEICS|CINDRA|CLP|CSPCCO|CIDOSO|CMULHER|CPD|CFFC|CTUR)\b/gi;
+  const siglaMatches = despachoText.match(siglaRegex);
+  if (siglaMatches) {
+    siglaMatches.forEach((s) => {
+      const upper = s.toUpperCase();
+      if (!siglasSeen.has(upper)) {
+        siglasSeen.add(upper);
+        found.push(upper);
+      }
+    });
+  }
+
+  // Parse full names: "Às Comissões de X e de Y" / "Às Comissões de X; Y; Z"
+  // Sort by longest key first to match longer names before shorter substrings
+  const entries = Object.entries(COMISSAO_NOME_SIGLA).sort((a, b) => b[0].length - a[0].length);
+  for (const [nome, sigla] of entries) {
+    if (sigla === "CE_ESP" || sigla === "CM") continue; // skip special
+    if (text.includes(nome) && !siglasSeen.has(sigla)) {
+      siglasSeen.add(sigla);
+      found.push(sigla);
+    }
+  }
+
+  return found;
+}
+
 function describeRite(project) {
   const status = project.statusProposicao || {};
   const tipo = (project.siglaTipo || "").toUpperCase();
@@ -713,23 +1199,50 @@ function describeRite(project) {
   const orgao = (status.siglaOrgao || "").toUpperCase();
   const sit = (status.descricaoSituacao || "").toLowerCase();
 
+  // Extract committees from despacho text (real API returns statusProposicao.despacho)
+  const despachoText = status.despacho || "";
+  let comissoes = extractComissoesFromDespacho(despachoText);
+
+  // If no committees found from despacho, try to infer from current organ
+  if (comissoes.length === 0 && orgao && orgao !== "PLEN" && orgao !== "MESA" && orgao !== "SF" && orgao !== "CN") {
+    comissoes = [orgao];
+  }
+
+  const comissoesStr = comissoes.length > 0 ? comissoes.join(" → ") : null;
+
   let rito = "";
 
   if (tipo === "PEC") {
     rito = "CCJC (admissibilidade) → Comissão Especial → Plenário (2 turnos, 3/5 dos votos) → Senado";
   } else if (tipo === "PLP") {
-    rito = "Comissões temáticas → CCJC → Plenário (maioria absoluta) → Senado → Sanção";
+    if (comissoesStr) {
+      rito = comissoesStr + " → Plenário (maioria absoluta) → Senado → Sanção";
+    } else {
+      rito = "CCJC + comissões de mérito → Plenário (maioria absoluta) → Senado → Sanção";
+    }
   } else if (tipo === "MPV") {
     rito = "Comissão Mista → Plenário Câmara → Plenário Senado (prazo de 60+60 dias)";
   } else if (tipo === "PDL") {
-    rito = "Comissões → Plenário (maioria simples) — sem sanção presidencial";
+    if (comissoesStr) {
+      rito = comissoesStr + " → Plenário (maioria simples) — sem sanção presidencial";
+    } else {
+      rito = "Comissões → Plenário (maioria simples) — sem sanção presidencial";
+    }
   } else {
     // PL and others
     const apreciacao = (status.apreciacao || "").toLowerCase();
     if (apreciacao.includes("conclusivo")) {
-      rito = "Comissões (poder conclusivo) → Senado → Sanção — sem necessidade de Plenário";
+      if (comissoesStr) {
+        rito = comissoesStr + " (poder conclusivo) → Senado → Sanção — sem Plenário";
+      } else {
+        rito = "Comissões (poder conclusivo) → Senado → Sanção — sem Plenário";
+      }
     } else {
-      rito = "Comissões temáticas → CCJC/CFT → Plenário (maioria simples) → Senado → Sanção";
+      if (comissoesStr) {
+        rito = comissoesStr + " → Plenário (maioria simples) → Senado → Sanção";
+      } else {
+        rito = "Comissões de mérito + CCJC/CFT → Plenário (maioria simples) → Senado → Sanção";
+      }
     }
   }
 
@@ -830,6 +1343,18 @@ const Icons = {
   Settings: () => (
     <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
   ),
+  Star: ({ filled }) => (
+    <svg width="16" height="16" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+  ),
+  Eye: () => (
+    <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+  ),
+  Calendar: () => (
+    <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+  ),
+  User: () => (
+    <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+  ),
 };
 
 // ─── Badge Component ───────────────────────────────────────────────────
@@ -915,7 +1440,7 @@ function CardSkeleton() {
 }
 
 // ─── Summary Panel ─────────────────────────────────────────────────────
-function SummaryPanel({ projects }) {
+function SummaryPanel({ projects, pendentesLeitura, janelaLabel, emPauta, prioritarios }) {
   const { dark } = useContext(AppContext);
   const urgentes = projects.filter((p) => isUrgente(p.statusProposicao?.regime)).length;
   const plenario = projects.filter((p) => {
@@ -928,6 +1453,9 @@ function SummaryPanel({ projects }) {
   }).length;
 
   const cards = [
+    { label: `Não vistos — janela ${janelaLabel || "—"}`, value: pendentesLeitura || 0, color: "#d97706", icon: "👁" },
+    { label: "Em pauta (7 dias)", value: emPauta || 0, color: "#7c3aed", icon: "📅" },
+    { label: "Prioritários", value: prioritarios || 0, color: "#b45309", icon: "⭐" },
     { label: "Em Urgência", value: urgentes, color: "#dc2626", icon: "🔴" },
     { label: "Plenário", value: plenario, color: "#2563eb", icon: "🏛" },
     { label: "Comissão", value: comissao, color: "#ea580c", icon: "📋" },
@@ -960,7 +1488,7 @@ function SummaryPanel({ projects }) {
 }
 
 // ─── Project Card (Enhanced with realtime info) ────────────────────────
-function ProjetoCard({ project, onSelect, onRemove, lastTramitacao }) {
+function ProjetoCard({ project, onSelect, onRemove, lastTramitacao, tramitacoes, meta, unread, onMarkVisto, onTogglePrioritario, pautaNotas, selectMode, selected, onToggleSelect }) {
   const { dark } = useContext(AppContext);
   const status = project.statusProposicao || {};
   const regime = regimeBadge(status.regime);
@@ -969,8 +1497,14 @@ function ProjetoCard({ project, onSelect, onRemove, lastTramitacao }) {
   const { rito, posicaoAtual } = describeRite(project);
   const stage = inferStage(status);
   const stageInfo = REGIMENTO_INTERNO.fases.find((f) => f.id === stage);
-  const topRec = getStrategicRecommendation(project, [])[0];
-  const situacaoExpl = REGIMENTO_INTERNO.situacoes[status.descricaoSituacao] || null;
+  const topRec = getStrategicRecommendation(project, tramitacoes || [])[0];
+  const m = meta || DEFAULT_META;
+  const relator = extractRelator(tramitacoes || []);
+  const pautaLabel = pautaBadgeLabel(pautaNotas);
+  const proximaPauta = pautaNotas && pautaNotas.length > 0 ? pautaNotas[0] : null;
+  const fimEmendas = relator && relator.orgao && relator.orgao !== "PLEN"
+    ? addSessionDaysEstimate(relator.dataDesignacao, PRAZO_EMENDAS_SESSOES)
+    : null;
 
   return (
     <div
@@ -978,10 +1512,18 @@ function ProjetoCard({ project, onSelect, onRemove, lastTramitacao }) {
       style={{
         padding: "18px 20px",
         borderRadius: 12,
-        background: dark ? "rgba(255,255,255,0.04)" : "#fff",
-        border: urgente
+        background: selected
+          ? (dark ? "rgba(220,38,38,0.08)" : "rgba(220,38,38,0.04)")
+          : (dark ? "rgba(255,255,255,0.04)" : "#fff"),
+        border: selected
           ? "2px solid #dc2626"
-          : `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"}`,
+          : urgente
+            ? "2px solid #dc2626"
+            : unread
+              ? "2px solid #d97706"
+              : m.prioritario
+                ? `2px solid ${dark ? "rgba(217,119,6,0.45)" : "rgba(217,119,6,0.35)"}`
+                : `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"}`,
         cursor: "pointer",
         transition: "all 0.2s",
         position: "relative",
@@ -990,30 +1532,95 @@ function ProjetoCard({ project, onSelect, onRemove, lastTramitacao }) {
       onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 6px 20px rgba(0,0,0,0.1)"; }}
       onMouseLeave={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = urgente ? "0 0 12px rgba(220,38,38,0.15)" : "0 1px 3px rgba(0,0,0,0.04)"; }}
     >
-      {urgente && (
+      {urgente && !selectMode && (
         <div style={{ position: "absolute", top: 8, right: 10, color: "#dc2626", animation: "pulse 2s infinite" }}>
           <Icons.Alert />
         </div>
       )}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-        <div style={{ fontWeight: 800, fontSize: 16, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif" }}>
-          {project.siglaTipo} {project.numero}/{project.ano}
-        </div>
-        <button
-          onClick={(e) => { e.stopPropagation(); onRemove(project.id); }}
-          style={{
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            color: dark ? "#6b7280" : "#9ca3af",
-            padding: 4,
-            borderRadius: 4,
-            display: "flex",
-          }}
-          title="Remover monitoramento"
+      {selectMode && (
+        <div
+          onClick={(e) => { e.stopPropagation(); onToggleSelect(project.id); }}
+          style={{ position: "absolute", top: 10, right: 10, cursor: "pointer" }}
         >
-          <Icons.Trash />
-        </button>
+          <div style={{
+            width: 22,
+            height: 22,
+            borderRadius: 4,
+            border: selected ? "2px solid #dc2626" : `2px solid ${dark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.2)"}`,
+            background: selected ? "#dc2626" : "transparent",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            transition: "all 0.15s",
+          }}>
+            {selected && <Icons.Check />}
+          </div>
+        </div>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+        <a
+          href={fichaTramitacaoUrl(project.id)}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          title="Abrir ficha de tramitação no site da Câmara"
+          style={{ fontWeight: 800, fontSize: 16, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif", textDecoration: "none", borderBottom: "1px dotted rgba(128,128,128,0.5)" }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = "#007A37"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = dark ? "#e5e7eb" : "#111827"; }}
+        >
+          {project.siglaTipo} {project.numero}/{project.ano}
+        </a>
+        <div style={{ display: "flex", gap: 2, alignItems: "center" }}>
+          {!selectMode && (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); onTogglePrioritario && onTogglePrioritario(project.id); }}
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  color: m.prioritario ? "#d97706" : (dark ? "#6b7280" : "#9ca3af"),
+                  padding: 4,
+                  borderRadius: 4,
+                  display: "flex",
+                }}
+                title={m.prioritario ? "Remover prioridade" : "Marcar como prioritário"}
+              >
+                <Icons.Star filled={m.prioritario} />
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); if (unread && onMarkVisto) onMarkVisto(project.id); }}
+                style={{
+                  background: unread ? (dark ? "rgba(217,119,6,0.15)" : "rgba(217,119,6,0.1)") : "none",
+                  border: "none",
+                  cursor: unread ? "pointer" : "default",
+                  color: unread ? "#d97706" : "#007A37",
+                  padding: 4,
+                  borderRadius: 4,
+                  display: "flex",
+                }}
+                title={unread ? "Marcar como visto nesta janela de leitura" : `Visto em ${m.vistoEm ? new Date(m.vistoEm).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}`}
+              >
+                {unread ? <Icons.Eye /> : <Icons.Check />}
+              </button>
+            </>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); onRemove(project.id); }}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              color: dark ? "#6b7280" : "#9ca3af",
+              padding: 4,
+              borderRadius: 4,
+              display: "flex",
+            }}
+            title="Remover monitoramento"
+          >
+            <Icons.Trash />
+          </button>
+        </div>
       </div>
 
       <p style={{ fontSize: 13, color: dark ? "#9ca3af" : "#6b7280", margin: "0 0 10px", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
@@ -1023,18 +1630,13 @@ function ProjetoCard({ project, onSelect, onRemove, lastTramitacao }) {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
         <Badge {...aprec} />
         <Badge {...regime} />
+        {unread && <Badge label="Não visto" color="#fff" bg="#d97706" />}
+        {m.prioritario && <Badge label="Prioritário" color="#78350f" bg="#fde68a" />}
+        {m.votado && <Badge label={`Votado${m.votadoData ? " " + new Date(m.votadoData + "T12:00:00").toLocaleDateString("pt-BR") : ""}`} color="#fff" bg="#166534" />}
+        {pautaLabel && <Badge label={pautaLabel} color="#fff" bg="#7c3aed" />}
       </div>
 
-      {/* Current status with explanation */}
-      {status.descricaoSituacao && (
-        <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", display: "flex", alignItems: "center", gap: 4, marginBottom: 6 }}>
-          <Icons.Clock />
-          <span style={{ fontWeight: 600 }}>{status.descricaoSituacao}</span>
-          {status.siglaOrgao && <span style={{ fontWeight: 700 }}> — {posicaoAtual || status.siglaOrgao}</span>}
-        </div>
-      )}
-
-      {/* Latest tramitação */}
+      {/* Último andamento (substitui o campo "Situação") */}
       {lastTramitacao && (
         <div style={{
           marginTop: 8,
@@ -1044,21 +1646,90 @@ function ProjetoCard({ project, onSelect, onRemove, lastTramitacao }) {
           border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.1)"}`,
         }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: "#007A37", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3 }}>
-            Ultimo Andamento
+            Último Andamento
           </div>
           <div style={{ fontSize: 11, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.4 }}>
-            {lastTramitacao.descricaoTramitacao
-              ? (lastTramitacao.descricaoTramitacao.length > 120
-                ? lastTramitacao.descricaoTramitacao.slice(0, 120) + "..."
-                : lastTramitacao.descricaoTramitacao)
-              : lastTramitacao.descricaoSituacao || "—"
-            }
+            {(() => {
+              const texto = lastTramitacao.despacho || lastTramitacao.descricaoTramitacao || lastTramitacao.descricaoSituacao || "—";
+              return texto.length > 160 ? texto.slice(0, 160) + "..." : texto;
+            })()}
           </div>
-          {lastTramitacao.dataHora && (
-            <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af", marginTop: 3 }}>
-              {new Date(lastTramitacao.dataHora).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+          <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+            <Icons.Clock />
+            {lastTramitacao.dataHora
+              ? new Date(lastTramitacao.dataHora).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
+              : "—"}
+            {(lastTramitacao.siglaOrgao || status.siglaOrgao) && (
+              <span style={{ fontWeight: 700 }}> • {lastTramitacao.siglaOrgao || posicaoAtual || status.siglaOrgao}</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Nota de pauta (evento legislativo) */}
+      {proximaPauta && (
+        <div style={{
+          marginTop: 8,
+          padding: "8px 10px",
+          borderRadius: 6,
+          background: dark ? "rgba(124,58,237,0.1)" : "rgba(124,58,237,0.05)",
+          border: `1px solid ${dark ? "rgba(124,58,237,0.25)" : "rgba(124,58,237,0.15)"}`,
+        }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#7c3aed", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3, display: "flex", alignItems: "center", gap: 4 }}>
+            <Icons.Calendar /> Nota de Pauta
+          </div>
+          <div style={{ fontSize: 11, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.4 }}>
+            {proximaPauta.dataHoraInicio && (
+              <strong>{new Date(proximaPauta.dataHoraInicio).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</strong>
+            )}
+            {proximaPauta.orgao && <span> — {proximaPauta.orgao}</span>}
+            {proximaPauta.descricaoTipo && <span> ({proximaPauta.descricaoTipo})</span>}
+          </div>
+          {proximaPauta.titulo && (
+            <div style={{ fontSize: 10, color: dark ? "#9ca3af" : "#6b7280", marginTop: 2, lineHeight: 1.4 }}>
+              {proximaPauta.titulo}{proximaPauta.regime ? ` — ${proximaPauta.regime}` : ""}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Relator + prazo de emendas (Art. 119, I, RICD) */}
+      <div style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", display: "flex", alignItems: "flex-start", gap: 4, marginTop: 8 }}>
+        <Icons.User />
+        {relator ? (
+          <span style={{ lineHeight: 1.4 }}>
+            <strong style={{ color: dark ? "#d1d5db" : "#374151" }}>Relator: Dep. {relator.nome}</strong>
+            {relator.partido && ` (${relator.partido})`}
+            {relator.orgao && ` — ${relator.orgao}`}
+            {relator.dataDesignacao && (
+              <span> • designado em {new Date(relator.dataDesignacao).toLocaleDateString("pt-BR")}</span>
+            )}
+          </span>
+        ) : (
+          <span>Relator não designado</span>
+        )}
+      </div>
+      {relator && fimEmendas && (
+        <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af", marginTop: 3, marginLeft: 18, lineHeight: 1.4 }}>
+          Emendas em comissão: {PRAZO_EMENDAS_SESSOES} sessões desde a designação (Art. 119, I, RICD) — estimativa até {fimEmendas.toLocaleDateString("pt-BR")}
+        </div>
+      )}
+
+      {/* Motivo da priorização */}
+      {m.prioritario && m.motivoPrioridade && (
+        <div style={{
+          marginTop: 8,
+          padding: "6px 10px",
+          borderRadius: 6,
+          background: dark ? "rgba(217,119,6,0.08)" : "rgba(217,119,6,0.05)",
+          border: `1px solid ${dark ? "rgba(217,119,6,0.2)" : "rgba(217,119,6,0.12)"}`,
+        }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#d97706", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 2 }}>
+            Motivo da Priorização
+          </div>
+          <div style={{ fontSize: 11, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.4 }}>
+            {m.motivoPrioridade.length > 120 ? m.motivoPrioridade.slice(0, 120) + "..." : m.motivoPrioridade}
+          </div>
         </div>
       )}
 
@@ -1136,7 +1807,9 @@ function SearchModal({ onClose, onAdd, onAddMultiple, monitoredIds, addToast }) 
   }, [mode]);
 
   const parseQuery = (q) => {
-    const match = q.trim().match(/^(PL|PEC|PDL|PLP|MPV|PLV|PRC|REQ|RIC|PDC|MSC|PLN|PFC|PFS)\s*(\d+)\s*\/\s*(\d{4})$/i);
+    // Accept any alphabetic sigla so no valid proposition type is excluded
+    // (PL, PEC, PLP, PDL, PDC, PRC, MPV, PLV, PLN, MSC, REQ, RIC, INC, SUG, ...)
+    const match = q.trim().match(/^([A-Za-z]{2,6})\s*(\d+)\s*\/\s*(\d{4})$/);
     if (match) return { sigla: match[1].toUpperCase(), numero: match[2], ano: match[3] };
     const nums = q.trim().match(/^(\d+)\s*\/\s*(\d{4})$/);
     if (nums) return { sigla: "PL", numero: nums[1], ano: nums[2] };
@@ -1280,6 +1953,16 @@ function SearchModal({ onClose, onAdd, onAddMultiple, monitoredIds, addToast }) 
     transition: "all 0.15s",
   });
 
+  // Computed values for sticky bars
+  const unmonitored = results.filter((r) => !monitoredIds.has(r.id));
+  const allMonitored = results.length > 0 && unmonitored.length === 0;
+  const showMonitorBar = mode === "deputado" && selectedDeputado && results.length > 0;
+  const showLoadMoreBar = mode === "deputado" && selectedDeputado && (hasMore || loadingAll) && results.length > 0;
+  // Items added from a "Relator" search are tagged for the Relatorias view
+  const extraMeta = mode === "deputado" && deputadoRole === "relator" && selectedDeputado
+    ? { relatorDe: selectedDeputado.nome }
+    : null;
+
   return (
     <div style={{ position: "fixed", inset: 0, background: overlay, zIndex: 1000, display: "flex", justifyContent: "center", alignItems: "flex-start", paddingTop: 60 }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: bg, borderRadius: 16, width: "92%", maxWidth: 640, maxHeight: "80vh", overflow: "hidden", boxShadow: "0 20px 60px rgba(0,0,0,0.3)", display: "flex", flexDirection: "column" }}>
@@ -1346,11 +2029,64 @@ function SearchModal({ onClose, onAdd, onAddMultiple, monitoredIds, addToast }) 
           </div>
           <p style={{ margin: "8px 0 0", fontSize: 11, color: dark ? "#6b7280" : "#9ca3af" }}>
             {mode === "proposicao"
-              ? "Tipos suportados: PL, PEC, PDL, PLP, MPV, PLV, PRC, PDC, MSC, PLN"
+              ? "Todos os tipos são suportados: PL, PEC, PLP, PDL, PDC, PRC, MPV, PLV, PLN, MSC, REQ, RIC, entre outros"
               : "Pesquise pelo nome (parcial) do deputado para ver suas proposições como autor ou relator"
             }
           </p>
         </div>
+
+        {/* Sticky bar: Monitorar Todos — always visible between search and results */}
+        {showMonitorBar && (
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "8px 24px",
+            background: dark ? "rgba(0,122,55,0.12)" : "rgba(0,122,55,0.06)",
+            borderBottom: `1px solid ${dark ? "rgba(0,122,55,0.2)" : "rgba(0,122,55,0.12)"}`,
+            flexShrink: 0,
+          }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: dark ? "#e5e7eb" : "#111827" }}>
+                {results.length} proposição(ões){depProjLoading ? " (carregando...)" : ""}
+              </div>
+              <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
+                {allMonitored ? "Todas já monitoradas" : `${unmonitored.length} não monitorada(s)`}
+                {hasMore && !loadingAll && " — mais disponíveis"}
+                {loadingAll && " — carregando todas..."}
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                if (allMonitored) return;
+                const toAdd = unmonitored.map((r) => detailsCache[r.id] || r);
+                onAddMultiple(toAdd, extraMeta);
+                addToast(`${toAdd.length} proposição(ões) adicionada(s) ao monitoramento`);
+              }}
+              disabled={allMonitored}
+              style={{
+                padding: "8px 18px",
+                borderRadius: 6,
+                border: "none",
+                background: allMonitored ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
+                color: allMonitored ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
+                fontWeight: 700,
+                fontSize: 12,
+                cursor: allMonitored ? "default" : "pointer",
+                whiteSpace: "nowrap",
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              {allMonitored ? (
+                <><Icons.Check /> Todos monitorados</>
+              ) : (
+                <><Icons.Plus /> Monitorar Todos ({unmonitored.length})</>
+              )}
+            </button>
+          </div>
+        )}
 
         {/* Scrollable Results */}
         <div style={{ flex: 1, overflow: "auto", padding: "16px 24px 24px" }}>
@@ -1466,63 +2202,7 @@ function SearchModal({ onClose, onAdd, onAddMultiple, monitoredIds, addToast }) 
                 </button>
               </div>
 
-              {/* Monitorar Todos button */}
-              {!depProjLoading && results.length > 0 && (() => {
-                const unmonitored = results.filter((r) => !monitoredIds.has(r.id));
-                const allMonitored = unmonitored.length === 0;
-                return (
-                  <div style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    padding: "10px 14px",
-                    borderRadius: 8,
-                    background: dark ? "rgba(0,122,55,0.08)" : "rgba(0,122,55,0.04)",
-                    border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.1)"}`,
-                    marginBottom: 14,
-                  }}>
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: dark ? "#e5e7eb" : "#111827" }}>
-                        {results.length} proposição(ões) encontrada(s)
-                      </div>
-                      <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
-                        {allMonitored ? "Todas já estão sendo monitoradas" : `${unmonitored.length} ainda não monitorada(s)`}
-                        {hasMore && " — carregue mais para ver todas"}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => {
-                        if (allMonitored) return;
-                        // Get the full details from cache when available
-                        const toAdd = unmonitored.map((r) => detailsCache[r.id] || r);
-                        onAddMultiple(toAdd);
-                        addToast(`${toAdd.length} proposição(ões) adicionada(s) ao monitoramento`);
-                      }}
-                      disabled={allMonitored}
-                      style={{
-                        padding: "8px 18px",
-                        borderRadius: 6,
-                        border: "none",
-                        background: allMonitored ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
-                        color: allMonitored ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
-                        fontWeight: 700,
-                        fontSize: 12,
-                        cursor: allMonitored ? "default" : "pointer",
-                        whiteSpace: "nowrap",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 4,
-                      }}
-                    >
-                      {allMonitored ? (
-                        <><Icons.Check /> Todos monitorados</>
-                      ) : (
-                        <><Icons.Plus /> Monitorar Todos ({unmonitored.length})</>
-                      )}
-                    </button>
-                  </div>
-                );
-              })()}
+
 
               {depProjLoading && results.length === 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1567,7 +2247,7 @@ function SearchModal({ onClose, onAdd, onAddMultiple, monitoredIds, addToast }) 
                 )}
                 {!det && <Skeleton width={180} height={20} style={{ marginBottom: 10 }} />}
                 <button
-                  onClick={() => !monitored && onAdd(det || item)}
+                  onClick={() => !monitored && onAdd(det || item, extraMeta)}
                   disabled={monitored}
                   style={{
                     padding: "6px 16px",
@@ -1589,61 +2269,79 @@ function SearchModal({ onClose, onAdd, onAddMultiple, monitoredIds, addToast }) 
             );
           })}
 
-          {/* Load more for deputy mode */}
-          {mode === "deputado" && selectedDeputado && hasMore && !depProjLoading && results.length > 0 && (
-            <div style={{ textAlign: "center", padding: "12px 0", display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-              <button
-                onClick={() => loadDeputadoProposicoes(selectedDeputado, deputadoRole, depPage + 1)}
-                style={{
-                  padding: "8px 24px",
-                  borderRadius: 8,
-                  border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
-                  background: "none",
-                  color: "#007A37",
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                Carregar mais proposições...
-              </button>
-              <button
-                onClick={loadAllProposicoes}
-                disabled={loadingAll}
-                style={{
-                  padding: "8px 24px",
-                  borderRadius: 8,
-                  border: "none",
-                  background: loadingAll ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
-                  color: loadingAll ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: loadingAll ? "default" : "pointer",
-                }}
-              >
-                {loadingAll ? "Carregando todas..." : "Carregar Todas as Proposições"}
-              </button>
-            </div>
-          )}
-
           {depProjLoading && results.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
               <CardSkeleton />
             </div>
           )}
         </div>
+
+        {/* Sticky bottom bar: Carregar Mais */}
+        {showLoadMoreBar && (
+          <div style={{
+            display: "flex",
+            gap: 10,
+            justifyContent: "center",
+            flexWrap: "wrap",
+            padding: "10px 24px",
+            background: bg,
+            borderTop: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+            flexShrink: 0,
+          }}>
+            <button
+              onClick={() => loadDeputadoProposicoes(selectedDeputado, deputadoRole, depPage + 1)}
+              disabled={loadingAll || depProjLoading}
+              style={{
+                padding: "8px 24px",
+                borderRadius: 8,
+                border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+                background: "none",
+                color: (loadingAll || depProjLoading) ? (dark ? "#6b7280" : "#9ca3af") : "#007A37",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: (loadingAll || depProjLoading) ? "default" : "pointer",
+              }}
+            >
+              {depProjLoading ? "Carregando..." : "Carregar mais proposições..."}
+            </button>
+            <button
+              onClick={loadAllProposicoes}
+              disabled={loadingAll || depProjLoading}
+              style={{
+                padding: "8px 24px",
+                borderRadius: 8,
+                border: "none",
+                background: (loadingAll || depProjLoading) ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
+                color: (loadingAll || depProjLoading) ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: (loadingAll || depProjLoading) ? "default" : "pointer",
+              }}
+            >
+              {loadingAll ? "Carregando todas..." : "Carregar Todas as Proposições"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 // ─── Filter Bar ────────────────────────────────────────────────────────
-function FilterBar({ filters, setFilters, projects }) {
+function FilterBar({ filters, setFilters, projects, projectMeta }) {
   const { dark } = useContext(AppContext);
   const [open, setOpen] = useState(false);
 
   const tipos = [...new Set(projects.map((p) => p.siglaTipo))].sort();
   const anos = [...new Set(projects.map((p) => p.ano))].sort().reverse();
+  const comissoes = [...new Set(projects.map((p) => p.statusProposicao?.siglaOrgao).filter(Boolean))].sort();
+  const areas = Object.keys(REGIMENTO_INTERNO.areasTematicas).sort();
+  const anosVotacao = [...new Set(
+    projects
+      .map((p) => getMeta(projectMeta || {}, p.id))
+      .filter((m) => m.votado && m.votadoData)
+      .map((m) => String(m.votadoData).slice(0, 4))
+  )].sort().reverse();
 
   const selectStyle = {
     padding: "6px 10px",
@@ -1667,9 +2365,28 @@ function FilterBar({ filters, setFilters, projects }) {
             <option value="">Todos os tipos</option>
             {tipos.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
-          <select value={filters.ano} onChange={(e) => setFilters((f) => ({ ...f, ano: e.target.value }))} style={selectStyle}>
-            <option value="">Todos os anos</option>
-            {anos.map((a) => <option key={a} value={a}>{a}</option>)}
+          <select value={filters.ano} onChange={(e) => setFilters((f) => ({ ...f, ano: e.target.value }))} style={selectStyle} title="Filtra pelo ano de apresentação da proposição">
+            <option value="">Ano da proposição — todos</option>
+            {anos.map((a) => <option key={a} value={a}>Proposições de {a}</option>)}
+          </select>
+          <select value={filters.anoVotacao || ""} onChange={(e) => setFilters((f) => ({ ...f, anoVotacao: e.target.value }))} style={selectStyle} title="Filtra pelo ano em que a proposição foi votada (campo 'Votado')">
+            <option value="">Ano da votação — todos</option>
+            {anosVotacao.map((a) => <option key={a} value={a}>Votadas em {a}</option>)}
+          </select>
+          <select value={filters.votado || ""} onChange={(e) => setFilters((f) => ({ ...f, votado: e.target.value }))} style={selectStyle}>
+            <option value="">Votação — todas</option>
+            <option value="votado">Somente votadas</option>
+            <option value="nao-votado">Somente não votadas</option>
+          </select>
+          <select value={filters.prioritario || ""} onChange={(e) => setFilters((f) => ({ ...f, prioritario: e.target.value }))} style={selectStyle}>
+            <option value="">Prioridade — todas</option>
+            <option value="prioritario">Somente prioritárias</option>
+            <option value="nao-prioritario">Somente não prioritárias</option>
+          </select>
+          <select value={filters.visto || ""} onChange={(e) => setFilters((f) => ({ ...f, visto: e.target.value }))} style={selectStyle}>
+            <option value="">Leitura — todas</option>
+            <option value="nao-visto">Somente não vistas</option>
+            <option value="visto">Somente vistas</option>
           </select>
           <select value={filters.regime} onChange={(e) => setFilters((f) => ({ ...f, regime: e.target.value }))} style={selectStyle}>
             <option value="">Todos os regimes</option>
@@ -1683,8 +2400,20 @@ function FilterBar({ filters, setFilters, projects }) {
             <option value="comissao">Comissão</option>
             <option value="conclusivo">Conclusivo</option>
           </select>
+          <select value={filters.comissao || ""} onChange={(e) => setFilters((f) => ({ ...f, comissao: e.target.value }))} style={selectStyle}>
+            <option value="">Todas as comissões</option>
+            {comissoes.map((c) => {
+              const info = REGIMENTO_INTERNO.orgaos[c];
+              return <option key={c} value={c}>{c}{info ? ` — ${info.nome}` : ""}</option>;
+            })}
+          </select>
+          <select value={filters.area || ""} onChange={(e) => setFilters((f) => ({ ...f, area: e.target.value }))} style={selectStyle}>
+            <option value="">Todas as áreas temáticas</option>
+            {areas.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
           <select value={filters.sort} onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value }))} style={selectStyle}>
             <option value="recente">Andamento mais recente</option>
+            <option value="prioritario">Prioritários primeiro</option>
             <option value="urgencia">Urgência primeiro</option>
             <option value="nome">Tipo/Número</option>
             <option value="ano">Ano (recente)</option>
@@ -1772,7 +2501,7 @@ function NotificationCenter({ notifications, onClose, markRead, clearAll }) {
 }
 
 // ─── Project Details Page ──────────────────────────────────────────────
-function ProjetoDetalhes({ project, onBack, addToast }) {
+function ProjetoDetalhes({ project, onBack, addToast, meta, updateMeta, pautaNotas, unread, onMarkVisto }) {
   const { dark } = useContext(AppContext);
   const [details, setDetails] = useState(null);
   const [tramitacoes, setTramitacoes] = useState([]);
@@ -1863,8 +2592,18 @@ function ProjetoDetalhes({ project, onBack, addToast }) {
           <Icons.Back /> Voltar
         </button>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
-          <h1 style={{ margin: 0, fontSize: 24, fontWeight: 900, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif" }}>
-            {project.siglaTipo} {project.numero}/{project.ano}
+          <h1 style={{ margin: 0, fontSize: 24, fontWeight: 900, fontFamily: "'Source Serif 4', Georgia, serif" }}>
+            <a
+              href={fichaTramitacaoUrl(project.id)}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Abrir ficha de tramitação no site da Câmara"
+              style={{ color: dark ? "#e5e7eb" : "#111827", textDecoration: "none", borderBottom: "2px dotted rgba(128,128,128,0.5)" }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "#007A37"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = dark ? "#e5e7eb" : "#111827"; }}
+            >
+              {project.siglaTipo} {project.numero}/{project.ano}
+            </a>
           </h1>
           {isUrgente(status.regime) && (
             <span style={{ color: "#dc2626", display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 700 }}>
@@ -1875,9 +2614,10 @@ function ProjetoDetalhes({ project, onBack, addToast }) {
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
           <Badge {...apreciacaoBadge(status.apreciacao)} />
           <Badge {...regimeBadge(status.regime)} />
-          {status.descricaoSituacao && (
-            <Badge label={status.descricaoSituacao} color={dark ? "#d1d5db" : "#374151"} bg={dark ? "rgba(255,255,255,0.1)" : "#f3f4f6"} />
-          )}
+          {unread && <Badge label="Não visto" color="#fff" bg="#d97706" />}
+          {meta?.prioritario && <Badge label="Prioritário" color="#78350f" bg="#fde68a" />}
+          {meta?.votado && <Badge label={`Votado${meta.votadoData ? " " + new Date(meta.votadoData + "T12:00:00").toLocaleDateString("pt-BR") : ""}`} color="#fff" bg="#166534" />}
+          {pautaBadgeLabel(pautaNotas) && <Badge label={pautaBadgeLabel(pautaNotas)} color="#fff" bg="#7c3aed" />}
         </div>
         <p style={{ fontSize: 14, color: dark ? "#9ca3af" : "#6b7280", lineHeight: 1.6, margin: 0 }}>
           {details?.ementa || project.ementa}
@@ -1888,6 +2628,175 @@ function ProjetoDetalhes({ project, onBack, addToast }) {
           </p>
         )}
       </div>
+
+      {/* Último andamento (substitui o campo "Situação") */}
+      {tramitacoes.length > 0 && (
+        <div style={{ marginBottom: 20, padding: "14px 16px", borderRadius: 10, background: dark ? "rgba(0,122,55,0.08)" : "rgba(0,122,55,0.04)", border: `1px solid ${dark ? "rgba(0,122,55,0.18)" : "rgba(0,122,55,0.1)"}` }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#007A37", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>
+            Último Andamento
+          </div>
+          <div style={{ fontSize: 13, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.6 }}>
+            {tramitacoes[0].despacho || tramitacoes[0].descricaoTramitacao || tramitacoes[0].descricaoSituacao || "—"}
+          </div>
+          <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", marginTop: 6, display: "flex", alignItems: "center", gap: 6 }}>
+            <Icons.Clock />
+            {tramitacoes[0].dataHora
+              ? new Date(tramitacoes[0].dataHora).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })
+              : "—"}
+            {tramitacoes[0].siglaOrgao && <span style={{ fontWeight: 700 }}>• {tramitacoes[0].siglaOrgao}</span>}
+          </div>
+        </div>
+      )}
+
+      {/* Notas de pauta (eventos legislativos com esta proposição em pauta) */}
+      {pautaNotas && pautaNotas.length > 0 && (
+        <div style={{ marginBottom: 20, padding: "14px 16px", borderRadius: 10, background: dark ? "rgba(124,58,237,0.1)" : "rgba(124,58,237,0.05)", border: `1px solid ${dark ? "rgba(124,58,237,0.25)" : "rgba(124,58,237,0.15)"}` }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#7c3aed", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            <Icons.Calendar /> Em Pauta — Eventos Legislativos
+          </div>
+          {pautaNotas.map((nota, i) => (
+            <div key={i} style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.5, marginBottom: i < pautaNotas.length - 1 ? 8 : 0 }}>
+              <strong>
+                {nota.dataHoraInicio ? new Date(nota.dataHoraInicio).toLocaleString("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "Data a definir"}
+              </strong>
+              {nota.orgao && <span> — {nota.orgao}</span>}
+              {nota.descricaoTipo && <span> ({nota.descricaoTipo})</span>}
+              {nota.titulo && (
+                <div style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", marginTop: 2 }}>
+                  {nota.titulo}{nota.regime ? ` — ${nota.regime}` : ""}{nota.relator ? ` — Relator: ${nota.relator}` : ""}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Relatoria: relator designado + prazo de emendas (Art. 119, I, RICD) */}
+      {(() => {
+        const relator = extractRelator(tramitacoes);
+        const fimEmendas = relator && relator.orgao && relator.orgao !== "PLEN"
+          ? addSessionDaysEstimate(relator.dataDesignacao, PRAZO_EMENDAS_SESSOES)
+          : null;
+        return (
+          <div style={{ marginBottom: 20, padding: "14px 16px", borderRadius: 10, background: dark ? "rgba(37,99,235,0.06)" : "rgba(37,99,235,0.03)", border: `1px solid ${dark ? "rgba(37,99,235,0.15)" : "rgba(37,99,235,0.08)"}` }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#2563eb", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+              <Icons.User /> Relatoria
+            </div>
+            {relator ? (
+              <div style={{ fontSize: 13, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.6 }}>
+                <strong>Dep. {relator.nome}</strong>
+                {relator.partido && ` (${relator.partido})`}
+                {relator.orgao && ` — ${relator.orgao}`}
+                {relator.dataDesignacao && (
+                  <div style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", marginTop: 4 }}>
+                    Designação do relator: <strong>{new Date(relator.dataDesignacao).toLocaleDateString("pt-BR")}</strong>
+                  </div>
+                )}
+                {fimEmendas && (
+                  <div style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", marginTop: 4, lineHeight: 1.5 }}>
+                    <strong>Prazo de emendas em comissão:</strong> {PRAZO_EMENDAS_SESSOES} sessões a contar da designação do relator
+                    (<strong>Art. 119, I, RICD</strong>) — estimativa em dias úteis: até <strong>{fimEmendas.toLocaleDateString("pt-BR")}</strong>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: dark ? "#9ca3af" : "#6b7280" }}>
+                Relator não designado
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Gestão do monitoramento: visto, prioritário + motivação, votado + data */}
+      {meta && updateMeta && (
+        <div style={{ marginBottom: 20, padding: "14px 16px", borderRadius: 10, background: dark ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)", border: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}` }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: dark ? "#9ca3af" : "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
+            Gestão do Monitoramento
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {/* Visto */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <button
+                onClick={() => unread && onMarkVisto && onMarkVisto(project.id)}
+                disabled={!unread}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 6,
+                  border: "none",
+                  background: unread ? "#d97706" : (dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.08)"),
+                  color: unread ? "#fff" : "#007A37",
+                  fontSize: 12, fontWeight: 700, cursor: unread ? "pointer" : "default",
+                }}
+              >
+                {unread ? <><Icons.Eye /> Marcar como visto</> : <><Icons.Check /> Visto</>}
+              </button>
+              <span style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af" }}>
+                {meta.vistoEm
+                  ? `Último visto: ${new Date(meta.vistoEm).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}${unread ? " — há novo andamento desde então" : ""}`
+                  : "Ainda não marcado como visto"}
+              </span>
+            </div>
+            {/* Prioritário + motivação */}
+            <div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: dark ? "#d1d5db" : "#374151", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={!!meta.prioritario}
+                  onChange={(e) => updateMeta(project.id, { prioritario: e.target.checked })}
+                  style={{ width: 16, height: 16, accentColor: "#d97706" }}
+                />
+                <strong>Prioritário</strong>
+              </label>
+              {meta.prioritario && (
+                <textarea
+                  value={meta.motivoPrioridade || ""}
+                  onChange={(e) => updateMeta(project.id, { motivoPrioridade: e.target.value })}
+                  placeholder="Motivação da priorização (ex.: interesse do gabinete, prazo de emendas próximo, acordo de líderes...)"
+                  rows={2}
+                  style={{
+                    marginTop: 8, width: "100%", padding: "8px 10px", borderRadius: 6, resize: "vertical",
+                    border: `1px solid ${dark ? "rgba(217,119,6,0.35)" : "rgba(217,119,6,0.3)"}`,
+                    background: dark ? "rgba(255,255,255,0.06)" : "#fffbeb",
+                    color: dark ? "#e5e7eb" : "#111827", fontSize: 12, outline: "none", fontFamily: "inherit",
+                  }}
+                />
+              )}
+            </div>
+            {/* Votado + data */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: dark ? "#d1d5db" : "#374151", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={!!meta.votado}
+                  onChange={(e) => updateMeta(project.id, e.target.checked
+                    ? { votado: true, votadoData: meta.votadoData || new Date().toISOString().slice(0, 10), votadoAuto: false }
+                    : { votado: false, votadoData: null, votadoAuto: false })}
+                  style={{ width: 16, height: 16, accentColor: "#166534" }}
+                />
+                <strong>Votado</strong>
+              </label>
+              {meta.votado && (
+                <input
+                  type="date"
+                  value={meta.votadoData || ""}
+                  onChange={(e) => updateMeta(project.id, { votadoData: e.target.value, votadoAuto: false })}
+                  style={{
+                    padding: "5px 8px", borderRadius: 6,
+                    border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+                    background: dark ? "rgba(255,255,255,0.06)" : "#f9fafb",
+                    color: dark ? "#e5e7eb" : "#111827", fontSize: 12, outline: "none",
+                  }}
+                />
+              )}
+              {meta.votado && meta.votadoAuto && (
+                <span style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
+                  (detectado automaticamente nas tramitações)
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Autores */}
       {autores.length > 0 && (
@@ -2095,20 +3004,32 @@ function ProjetoDetalhes({ project, onBack, addToast }) {
               </div>
             )}
 
-            {/* Situação explanation */}
-            {situacaoExpl && (
-              <div style={{
-                padding: "12px 16px",
-                borderRadius: 8,
-                background: dark ? "rgba(0,122,55,0.06)" : "rgba(0,122,55,0.03)",
-                border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.08)"}`,
-              }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#007A37", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
-                  Situação: {status.descricaoSituacao}
+            {/* Último andamento (substitui o campo "Situação") */}
+            {tramitacoes.length > 0 && (() => {
+              const lastTram = tramitacoes[0];
+              const tramExpl = REGIMENTO_INTERNO.situacoes[lastTram.descricaoSituacao] || situacaoExpl || null;
+              return (
+                <div style={{
+                  padding: "12px 16px",
+                  borderRadius: 8,
+                  background: dark ? "rgba(0,122,55,0.06)" : "rgba(0,122,55,0.03)",
+                  border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.08)"}`,
+                }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#007A37", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
+                    Último Andamento
+                    {lastTram.dataHora && ` — ${new Date(lastTram.dataHora).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}`}
+                  </div>
+                  <p style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", margin: 0, lineHeight: 1.5 }}>
+                    {lastTram.despacho || lastTram.descricaoTramitacao || lastTram.descricaoSituacao || "—"}
+                  </p>
+                  {tramExpl && (
+                    <p style={{ fontSize: 11, color: dark ? "#9ca3af" : "#6b7280", margin: "6px 0 0", lineHeight: 1.5, fontStyle: "italic" }}>
+                      {tramExpl}
+                    </p>
+                  )}
                 </div>
-                <p style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", margin: 0, lineHeight: 1.5 }}>{situacaoExpl}</p>
-              </div>
-            )}
+              );
+            })()}
           </div>
         );
       })()}
@@ -2471,6 +3392,31 @@ function SettingsModal({ onClose, settings, setSettings, demoMode, toggleDemoMod
           </label>
 
           <div style={{ borderTop: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`, paddingTop: 16, marginTop: 4 }}>
+            <label style={{ display: "block", fontSize: 13, color: dark ? "#d1d5db" : "#374151" }}>
+              <div style={{ fontWeight: 700 }}>Parlamentar de interesse (Relatorias)</div>
+              <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", margin: "2px 0 8px" }}>
+                Proposições em que este deputado for identificado como relator aparecem na aba "Relatorias"
+              </div>
+              <input
+                type="text"
+                value={settings.parlamentarInteresse || ""}
+                onChange={(e) => setSettings((s) => ({ ...s, parlamentarInteresse: e.target.value }))}
+                placeholder="Ex.: Tabata Amaral"
+                style={{
+                  width: "100%",
+                  padding: "8px 10px",
+                  borderRadius: 6,
+                  border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+                  background: dark ? "rgba(255,255,255,0.06)" : "#f9fafb",
+                  color: dark ? "#e5e7eb" : "#111827",
+                  fontSize: 13,
+                  outline: "none",
+                }}
+              />
+            </label>
+          </div>
+
+          <div style={{ borderTop: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`, paddingTop: 16, marginTop: 4 }}>
             <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, color: dark ? "#d1d5db" : "#374151" }}>
               <div>
                 <div style={{ fontWeight: 700 }}>Modo demonstração</div>
@@ -2492,6 +3438,135 @@ function SettingsModal({ onClose, settings, setSettings, demoMode, toggleDemoMod
   );
 }
 
+// ─── Relatoria Card (layout dedicado da visão "Relatorias") ────────────
+function RelatoriaCard({ project, relator, meta, lastTramitacao, tramitacoes, onSelect, pautaNotas }) {
+  const { dark } = useContext(AppContext);
+  const status = project.statusProposicao || {};
+  const regime = (status.regime || "").toLowerCase();
+  const urgente = isUrgente(status.regime);
+  // Art. 52 RICD: 10 sessões (ordinário) / 5 sessões (urgência ou prioridade)
+  const prazoParecerSessoes = regime.includes("urg") || regime.includes("prioridade") ? 5 : 10;
+  const fimEmendas = relator && relator.orgao && relator.orgao !== "PLEN"
+    ? addSessionDaysEstimate(relator.dataDesignacao, PRAZO_EMENDAS_SESSOES)
+    : null;
+  const fimParecer = relator ? addSessionDaysEstimate(relator.dataDesignacao, prazoParecerSessoes) : null;
+  const situacaoRelatoria = (() => {
+    if (!relator || !relator.dataDesignacao) return "Relatoria identificada na busca por deputado";
+    const desigTime = new Date(relator.dataDesignacao).getTime();
+    const parecerDepois = (tramitacoes || []).some((t) => {
+      if (!t.dataHora || new Date(t.dataHora).getTime() <= desigTime) return false;
+      const texto = `${t.despacho || ""} ${t.descricaoTramitacao || ""} ${t.descricaoSituacao || ""}`.toLowerCase();
+      return texto.includes("parecer");
+    });
+    return parecerDepois ? "Parecer já apresentado/movimentado após a designação" : "Aguardando parecer do relator";
+  })();
+  const nomeRelator = relator
+    ? `Dep. ${relator.nome}${relator.partido ? ` (${relator.partido})` : ""}`
+    : (meta.relatorDe ? `Dep. ${meta.relatorDe}` : "—");
+  const pautaLabel = pautaBadgeLabel(pautaNotas);
+
+  const rowStyle = { display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, padding: "6px 0", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)"}` };
+  const labelStyle = { color: dark ? "#6b7280" : "#9ca3af", fontWeight: 600, whiteSpace: "nowrap" };
+  const valueStyle = { color: dark ? "#d1d5db" : "#374151", textAlign: "right", lineHeight: 1.4 };
+
+  return (
+    <div
+      onClick={() => onSelect(project)}
+      style={{
+        padding: "18px 20px",
+        borderRadius: 12,
+        background: dark ? "rgba(37,99,235,0.05)" : "#fff",
+        border: `2px solid ${dark ? "rgba(37,99,235,0.35)" : "rgba(37,99,235,0.25)"}`,
+        cursor: "pointer",
+        transition: "all 0.2s",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 6px 20px rgba(37,99,235,0.15)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.04)"; }}
+    >
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8, alignItems: "center" }}>
+        <Badge label="Relatoria" color="#fff" bg="#2563eb" />
+        {urgente && <Badge {...regimeBadge(status.regime)} />}
+        {pautaLabel && <Badge label={pautaLabel} color="#fff" bg="#7c3aed" />}
+        {meta.prioritario && <Badge label="Prioritário" color="#78350f" bg="#fde68a" />}
+      </div>
+      <a
+        href={fichaTramitacaoUrl(project.id)}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        title="Abrir ficha de tramitação no site da Câmara"
+        style={{ fontWeight: 800, fontSize: 16, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif", textDecoration: "none", borderBottom: "1px dotted rgba(128,128,128,0.5)" }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "#2563eb"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = dark ? "#e5e7eb" : "#111827"; }}
+      >
+        {project.siglaTipo} {project.numero}/{project.ano}
+      </a>
+      <p style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", margin: "6px 0 10px", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+        {project.ementa}
+      </p>
+
+      <div style={rowStyle}>
+        <span style={labelStyle}>Relator</span>
+        <span style={{ ...valueStyle, fontWeight: 700 }}>{nomeRelator}</span>
+      </div>
+      <div style={rowStyle}>
+        <span style={labelStyle}>Órgão</span>
+        <span style={valueStyle}>{relator?.orgao || status.siglaOrgao || "—"}</span>
+      </div>
+      <div style={rowStyle}>
+        <span style={labelStyle}>Designação</span>
+        <span style={valueStyle}>
+          {relator?.dataDesignacao ? new Date(relator.dataDesignacao).toLocaleDateString("pt-BR") : "não identificada nas tramitações"}
+        </span>
+      </div>
+      <div style={rowStyle}>
+        <span style={labelStyle}>Prazo do parecer</span>
+        <span style={valueStyle}>
+          {prazoParecerSessoes} sessões (Art. 52 RICD){fimParecer ? ` — est. ${fimParecer.toLocaleDateString("pt-BR")}` : ""}
+        </span>
+      </div>
+      {fimEmendas && (
+        <div style={rowStyle}>
+          <span style={labelStyle}>Prazo de emendas</span>
+          <span style={valueStyle}>
+            {PRAZO_EMENDAS_SESSOES} sessões (Art. 119, I, RICD) — est. {fimEmendas.toLocaleDateString("pt-BR")}
+          </span>
+        </div>
+      )}
+      <div style={{ ...rowStyle, borderBottom: "none" }}>
+        <span style={labelStyle}>Situação da relatoria</span>
+        <span style={{ ...valueStyle, fontWeight: 600 }}>{situacaoRelatoria}</span>
+      </div>
+
+      {lastTramitacao && (
+        <div style={{
+          marginTop: 8,
+          padding: "8px 10px",
+          borderRadius: 6,
+          background: dark ? "rgba(0,122,55,0.08)" : "rgba(0,122,55,0.04)",
+          border: `1px solid ${dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.1)"}`,
+        }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#007A37", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3 }}>
+            Último Andamento
+          </div>
+          <div style={{ fontSize: 11, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.4 }}>
+            {(() => {
+              const texto = lastTramitacao.despacho || lastTramitacao.descricaoTramitacao || lastTramitacao.descricaoSituacao || "—";
+              return texto.length > 140 ? texto.slice(0, 140) + "..." : texto;
+            })()}
+          </div>
+          {lastTramitacao.dataHora && (
+            <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af", marginTop: 3 }}>
+              {new Date(lastTramitacao.dataHora).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // ─── MAIN APP ──────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════
@@ -2500,22 +3575,44 @@ export default function App() {
   const [dark, setDark] = useState(() => loadStorage(STORAGE_KEYS.THEME, false));
   const [projects, setProjects] = useState(() => loadStorage(STORAGE_KEYS.PROJECTS, []));
   const [notifications, setNotifications] = useState(() => loadStorage(STORAGE_KEYS.NOTIFICATIONS, []));
-  const [settings, setSettings] = useState(() => loadStorage(STORAGE_KEYS.SETTINGS, { pollingInterval: 30, pushEnabled: true, soundEnabled: true }));
+  const [settings, setSettings] = useState(() => loadStorage(STORAGE_KEYS.SETTINGS, { pollingInterval: 30, pushEnabled: true, soundEnabled: true, parlamentarInteresse: "" }));
   const [demoMode, setDemoMode] = useState(DEMO_MODE);
+  // Per-project user metadata (visto, prioritário+motivação, votado+data, relatoria).
+  // Migração retrocompatível: dados antigos sem a chave recebem defaults via getMeta().
+  const [projectMeta, setProjectMeta] = useState(() => loadStorage(STORAGE_KEYS.PROJECT_META, {}));
 
   const [view, setView] = useState("dashboard"); // dashboard | details
+  const [dashTab, setDashTab] = useState("todos"); // todos | relatorias
   const [selectedProject, setSelectedProject] = useState(null);
   const [showSearch, setShowSearch] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [filters, setFilters] = useState({ tipo: "", ano: "", regime: "", apreciacao: "", sort: "recente" });
+  const [filters, setFilters] = useState({ tipo: "", ano: "", anoVotacao: "", regime: "", apreciacao: "", comissao: "", area: "", visto: "", prioritario: "", votado: "", sort: "recente" });
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [lastTramitacoes, setLastTramitacoes] = useState({}); // { projectId: tramitacaoObj }
+  const [tramitacoesMap, setTramitacoesMap] = useState({}); // { projectId: [tramitações DESC] }
+  const [pautas, setPautas] = useState({}); // { projectId: [notas de pauta] }
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  // Recomputes the current reading window (08h/14h/18h) every minute
+  const [windowTick, setWindowTick] = useState(Date.now());
 
   const monitoredIds = useMemo(() => new Set(projects.map((p) => p.id)), [projects]);
   const unreadCount = notifications.filter((n) => !n.read).length;
+  const lastTramitacoes = useMemo(() => {
+    const out = {};
+    Object.entries(tramitacoesMap).forEach(([id, trams]) => {
+      if (trams && trams.length > 0) out[id] = trams[0];
+    });
+    return out;
+  }, [tramitacoesMap]);
+
+  const currentWindow = useMemo(() => getCurrentReadingWindow(new Date(windowTick)), [windowTick]);
+  useEffect(() => {
+    const t = setInterval(() => setWindowTick(Date.now()), 60000);
+    return () => clearInterval(t);
+  }, []);
 
   // Toggle demo mode
   const toggleDemoMode = useCallback((val) => {
@@ -2528,6 +3625,100 @@ export default function App() {
   useEffect(() => { saveStorage(STORAGE_KEYS.NOTIFICATIONS, notifications); }, [notifications]);
   useEffect(() => { saveStorage(STORAGE_KEYS.SETTINGS, settings); }, [settings]);
   useEffect(() => { saveStorage(STORAGE_KEYS.THEME, dark); }, [dark]);
+  useEffect(() => { saveStorage(STORAGE_KEYS.PROJECT_META, projectMeta); }, [projectMeta]);
+
+  // Per-project metadata helpers
+  const updateMeta = useCallback((id, patch) => {
+    setProjectMeta((prev) => ({ ...prev, [id]: { ...(prev[id] || {}), ...patch } }));
+  }, []);
+
+  const marcarVisto = useCallback((id) => {
+    const last = (tramitacoesMap[id] || [])[0];
+    updateMeta(id, { vistoEm: new Date().toISOString(), vistoTram: last?.dataHora || null });
+  }, [tramitacoesMap, updateMeta]);
+
+  const marcarTodosVistos = useCallback(() => {
+    const agora = new Date().toISOString();
+    setProjectMeta((prev) => {
+      const next = { ...prev };
+      for (const proj of projects) {
+        const last = (tramitacoesMap[proj.id] || [])[0];
+        next[proj.id] = { ...(next[proj.id] || {}), vistoEm: agora, vistoTram: last?.dataHora || null };
+      }
+      return next;
+    });
+  }, [projects, tramitacoesMap]);
+
+  const togglePrioritario = useCallback((id) => {
+    setProjectMeta((prev) => {
+      const cur = { ...DEFAULT_META, ...(prev[id] || {}) };
+      return { ...prev, [id]: { ...(prev[id] || {}), prioritario: !cur.prioritario } };
+    });
+  }, []);
+
+  // Auto-detect voted propositions from freshly fetched tramitações.
+  // Only fills propositions never evaluated (votado === null/undefined),
+  // so a manual (un)check is never overridden.
+  const autoDetectVotados = useCallback((tramsById) => {
+    setProjectMeta((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      Object.entries(tramsById).forEach(([id, trams]) => {
+        const cur = next[id] || {};
+        if (cur.votado !== undefined && cur.votado !== null) return;
+        const det = detectVotacao(trams);
+        if (det && det.data) {
+          next[id] = { ...cur, votado: true, votadoData: det.data, votadoAuto: true };
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, []);
+
+  // ─── Pauta de eventos legislativos (GET /eventos + /eventos/{id}/pauta) ──
+  const checkPautas = useCallback(async () => {
+    if (projects.length === 0) { setPautas({}); return; }
+    try {
+      const hoje = new Date();
+      const fim = new Date();
+      fim.setDate(fim.getDate() + 7);
+      const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const eventos = await getEventos(fmt(hoje), fmt(fim));
+      const monitored = new Set(projects.map((p) => p.id));
+      const found = {};
+      const batchSize = 8;
+      for (let i = 0; i < eventos.length; i += batchSize) {
+        await Promise.all(eventos.slice(i, i + batchSize).map(async (ev) => {
+          try {
+            const pauta = await getEventoPauta(ev.id);
+            for (const item of pauta) {
+              const propId = item.proposicao_ && item.proposicao_.id;
+              if (!propId || !monitored.has(propId)) continue;
+              if (!found[propId]) found[propId] = [];
+              found[propId].push({
+                eventoId: ev.id,
+                dataHoraInicio: ev.dataHoraInicio || null,
+                orgao: (ev.orgaos && ev.orgaos[0] && (ev.orgaos[0].sigla || ev.orgaos[0].nome)) || "",
+                descricaoTipo: ev.descricaoTipo || "",
+                titulo: item.titulo || item.topico || "",
+                regime: item.regime || "",
+                relator: (item.relator && item.relator.nome) || null,
+              });
+            }
+          } catch { /* skip event */ }
+        }));
+      }
+      Object.values(found).forEach((list) =>
+        list.sort((a, b) => new Date(a.dataHoraInicio || 0) - new Date(b.dataHoraInicio || 0)));
+      setPautas(found);
+    } catch { /* keep previous pautas on failure */ }
+  }, [projects]);
+
+  useEffect(() => {
+    if (projects.length > 0) checkPautas();
+    else setPautas({});
+  }, [projects.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Toast helpers
   const addToast = useCallback((message, type = "success") => {
@@ -2537,8 +3728,8 @@ export default function App() {
   }, []);
   const dismissToast = useCallback((id) => setToasts((t) => t.filter((x) => x.id !== id)), []);
 
-  // Add project
-  const addProject = useCallback(async (item) => {
+  // Add project (extraMeta: e.g. { relatorDe } when added from a relator search)
+  const addProject = useCallback(async (item, extraMeta) => {
     let full = item;
     if (!item.statusProposicao) {
       try {
@@ -2551,11 +3742,12 @@ export default function App() {
       if (prev.find((p) => p.id === full.id)) return prev;
       return [full, ...prev];
     });
+    if (extraMeta) updateMeta(full.id, extraMeta);
     addToast(`${full.siglaTipo || ""} ${full.numero || ""}/${full.ano || ""} adicionado ao monitoramento`);
-  }, [addToast]);
+  }, [addToast, updateMeta]);
 
   // Add multiple projects at once
-  const addMultipleProjects = useCallback(async (items) => {
+  const addMultipleProjects = useCallback(async (items, extraMeta) => {
     const toAdd = [];
     for (const item of items) {
       let full = item;
@@ -2573,13 +3765,40 @@ export default function App() {
       const newOnes = toAdd.filter((p) => !existingIds.has(p.id));
       return [...newOnes, ...prev];
     });
+    if (extraMeta) {
+      setProjectMeta((prev) => {
+        const next = { ...prev };
+        toAdd.forEach((p) => { next[p.id] = { ...(next[p.id] || {}), ...extraMeta }; });
+        return next;
+      });
+    }
   }, []);
 
   // Remove project
   const removeProject = useCallback((id) => {
     setProjects((prev) => prev.filter((p) => p.id !== id));
+    setSelectedIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
     addToast("Projeto removido", "warning");
   }, [addToast]);
+
+  // Remove multiple projects
+  const removeMultipleProjects = useCallback((ids) => {
+    const idSet = new Set(ids);
+    setProjects((prev) => prev.filter((p) => !idSet.has(p.id)));
+    setSelectedIds(new Set());
+    setSelectMode(false);
+    addToast(`${ids.length} projeto(s) removido(s)`, "warning");
+  }, [addToast]);
+
+  // Toggle selection
+  const toggleSelect = useCallback((id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   // Refresh all projects
   const refreshAll = useCallback(async () => {
@@ -2587,6 +3806,7 @@ export default function App() {
     setRefreshing(true);
     const lastTram = loadStorage(STORAGE_KEYS.LAST_TRAMITACOES, {});
     const newNotifs = [];
+    const tramsUpdates = {};
 
     for (const proj of projects) {
       try {
@@ -2643,13 +3863,18 @@ export default function App() {
         // Update stored project
         setProjects((prev) => prev.map((p) => p.id === proj.id ? { ...p, ...updated } : p));
 
-        // Store latest tramitação for dashboard
+        // Store full tramitações (relator, prazos e visto dependem do histórico)
         if (trams.length > 0) {
-          setLastTramitacoes((prev) => ({ ...prev, [proj.id]: trams[0] }));
+          tramsUpdates[proj.id] = trams;
         }
       } catch (err) {
         console.warn(`Failed to refresh ${proj.id}:`, err);
       }
+    }
+
+    if (Object.keys(tramsUpdates).length > 0) {
+      setTramitacoesMap((prev) => ({ ...prev, ...tramsUpdates }));
+      autoDetectVotados(tramsUpdates);
     }
 
     saveStorage(STORAGE_KEYS.LAST_TRAMITACOES, lastTram);
@@ -2666,25 +3891,27 @@ export default function App() {
       }
     }
 
+    checkPautas();
     setRefreshing(false);
-  }, [projects, refreshing, settings.pushEnabled, addToast]);
+  }, [projects, refreshing, settings.pushEnabled, addToast, autoDetectVotados, checkPautas]);
 
-  // Fetch latest tramitações for all projects on mount and when projects change
-  const fetchLastTramitacoes = useCallback(async () => {
+  // Fetch full tramitações for all projects on mount and when projects change
+  const fetchTramitacoes = useCallback(async () => {
     const results = {};
     for (const proj of projects) {
       try {
         const trams = await getTramitacoes(proj.id);
         if (trams.length > 0) {
-          results[proj.id] = trams[0];
+          results[proj.id] = trams;
         }
       } catch { /* ignore */ }
     }
-    setLastTramitacoes(results);
-  }, [projects]);
+    setTramitacoesMap(results);
+    autoDetectVotados(results);
+  }, [projects, autoDetectVotados]);
 
   useEffect(() => {
-    if (projects.length > 0) fetchLastTramitacoes();
+    if (projects.length > 0) fetchTramitacoes();
   }, [projects.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Polling
@@ -2724,7 +3951,47 @@ export default function App() {
         return true;
       });
     }
-    if (filters.sort === "recente") {
+    if (filters.comissao) {
+      list = list.filter((p) => (p.statusProposicao?.siglaOrgao || "") === filters.comissao);
+    }
+    if (filters.area) {
+      const comissoesArea = REGIMENTO_INTERNO.areasTematicas[filters.area] || [];
+      list = list.filter((p) => comissoesArea.includes(p.statusProposicao?.siglaOrgao || ""));
+    }
+    if (filters.visto) {
+      list = list.filter((p) => {
+        const unread = isProjectUnread(getMeta(projectMeta, p.id), lastTramitacoes[p.id]);
+        return filters.visto === "nao-visto" ? unread : !unread;
+      });
+    }
+    if (filters.prioritario) {
+      list = list.filter((p) => {
+        const prio = getMeta(projectMeta, p.id).prioritario;
+        return filters.prioritario === "prioritario" ? prio : !prio;
+      });
+    }
+    if (filters.votado) {
+      list = list.filter((p) => {
+        const v = !!getMeta(projectMeta, p.id).votado;
+        return filters.votado === "votado" ? v : !v;
+      });
+    }
+    if (filters.anoVotacao) {
+      list = list.filter((p) => {
+        const m = getMeta(projectMeta, p.id);
+        return m.votado && m.votadoData && String(m.votadoData).slice(0, 4) === filters.anoVotacao;
+      });
+    }
+    if (filters.sort === "prioritario") {
+      list.sort((a, b) => {
+        const pa = getMeta(projectMeta, a.id).prioritario ? 0 : 1;
+        const pb = getMeta(projectMeta, b.id).prioritario ? 0 : 1;
+        if (pa !== pb) return pa - pb;
+        const dateA = lastTramitacoes[a.id]?.dataHora ? new Date(lastTramitacoes[a.id].dataHora).getTime() : 0;
+        const dateB = lastTramitacoes[b.id]?.dataHora ? new Date(lastTramitacoes[b.id].dataHora).getTime() : 0;
+        return dateB - dateA;
+      });
+    } else if (filters.sort === "recente") {
       // Sort by most recent tramitação first, then by urgency
       list.sort((a, b) => {
         const tramA = lastTramitacoes[a.id];
@@ -2749,7 +4016,29 @@ export default function App() {
       list.sort((a, b) => `${a.siglaTipo}${a.numero}`.localeCompare(`${b.siglaTipo}${b.numero}`));
     }
     return list;
-  }, [projects, filters, lastTramitacoes]);
+  }, [projects, filters, lastTramitacoes, projectMeta]);
+
+  // Reading routine: items not yet seen in the current window / with new movement
+  const pendentesLeitura = useMemo(() =>
+    projects.filter((p) => isProjectUnread(getMeta(projectMeta, p.id), lastTramitacoes[p.id])).length,
+  [projects, projectMeta, lastTramitacoes]);
+
+  const totalPrioritarios = useMemo(() =>
+    projects.filter((p) => getMeta(projectMeta, p.id).prioritario).length,
+  [projects, projectMeta]);
+
+  // Relatorias: added via "Relator" search or whose extracted relator matches
+  // the configured parliamentarian of interest
+  const relatorias = useMemo(() => {
+    const interesse = (settings.parlamentarInteresse || "").trim().toLowerCase();
+    return projects.map((p) => {
+      const meta = getMeta(projectMeta, p.id);
+      const relator = extractRelator(tramitacoesMap[p.id] || []);
+      const match = !!meta.relatorDe ||
+        (interesse && relator && relator.nome.toLowerCase().includes(interesse));
+      return match ? { project: p, relator, meta } : null;
+    }).filter(Boolean);
+  }, [projects, projectMeta, tramitacoesMap, settings.parlamentarInteresse]);
 
   // Notification helpers
   const markRead = (idx) => {
@@ -2969,8 +4258,161 @@ export default function App() {
                   </p>
                 </div>
 
-                <SummaryPanel projects={projects} />
-                <FilterBar filters={filters} setFilters={setFilters} projects={projects} />
+                {/* Dashboard tabs: Monitorados | Relatorias */}
+                <div style={{ display: "flex", borderBottom: `1px solid ${theme.border}`, marginBottom: 20 }}>
+                  <button
+                    onClick={() => setDashTab("todos")}
+                    style={{
+                      padding: "8px 18px", border: "none", background: "none", cursor: "pointer",
+                      borderBottom: dashTab === "todos" ? "3px solid #007A37" : "3px solid transparent",
+                      color: dashTab === "todos" ? theme.text : theme.muted,
+                      fontWeight: dashTab === "todos" ? 800 : 500, fontSize: 13,
+                    }}
+                  >
+                    Monitorados ({projects.length})
+                  </button>
+                  <button
+                    onClick={() => setDashTab("relatorias")}
+                    style={{
+                      padding: "8px 18px", border: "none", background: "none", cursor: "pointer",
+                      borderBottom: dashTab === "relatorias" ? "3px solid #2563eb" : "3px solid transparent",
+                      color: dashTab === "relatorias" ? theme.text : theme.muted,
+                      fontWeight: dashTab === "relatorias" ? 800 : 500, fontSize: 13,
+                    }}
+                  >
+                    Relatorias ({relatorias.length})
+                  </button>
+                </div>
+
+                <SummaryPanel
+                  projects={projects}
+                  pendentesLeitura={pendentesLeitura}
+                  janelaLabel={currentWindow.label}
+                  emPauta={Object.keys(pautas).length}
+                  prioritarios={totalPrioritarios}
+                />
+
+                {dashTab === "todos" && (<>
+                {/* Rotina de leitura: janela atual + pendentes */}
+                {projects.length > 0 && (
+                  <div style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10,
+                    padding: "10px 14px", borderRadius: 8, marginBottom: 16,
+                    background: pendentesLeitura > 0 ? (dark ? "rgba(217,119,6,0.1)" : "rgba(217,119,6,0.06)") : (dark ? "rgba(0,122,55,0.08)" : "rgba(0,122,55,0.04)"),
+                    border: `1px solid ${pendentesLeitura > 0 ? (dark ? "rgba(217,119,6,0.3)" : "rgba(217,119,6,0.2)") : (dark ? "rgba(0,122,55,0.2)" : "rgba(0,122,55,0.12)")}`,
+                  }}>
+                    <div style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151" }}>
+                      <strong>Janela de leitura atual: {currentWindow.label}</strong>
+                      <span style={{ color: theme.muted }}> (rotina 08h • 14h • 18h) — </span>
+                      {pendentesLeitura > 0
+                        ? <strong style={{ color: "#d97706" }}>{pendentesLeitura} pendente(s) de leitura</strong>
+                        : <strong style={{ color: "#007A37" }}>tudo visto</strong>}
+                    </div>
+                    {pendentesLeitura > 0 && (
+                      <button
+                        onClick={marcarTodosVistos}
+                        style={{
+                          padding: "6px 14px", borderRadius: 6, border: "none", background: "#d97706",
+                          color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer",
+                          display: "flex", alignItems: "center", gap: 4,
+                        }}
+                      >
+                        <Icons.Check /> Marcar todos como vistos
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                <FilterBar filters={filters} setFilters={setFilters} projects={projects} projectMeta={projectMeta} />
+
+                {/* Bulk actions bar */}
+                {projects.length > 0 && (
+                  <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+                    <button
+                      onClick={() => { setSelectMode(!selectMode); setSelectedIds(new Set()); }}
+                      style={{
+                        padding: "6px 14px",
+                        borderRadius: 6,
+                        border: `1px solid ${selectMode ? "#dc2626" : (dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)")}`,
+                        background: selectMode ? (dark ? "rgba(220,38,38,0.1)" : "rgba(220,38,38,0.05)") : "none",
+                        color: selectMode ? "#dc2626" : (dark ? "#9ca3af" : "#6b7280"),
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
+                      {selectMode ? <><Icons.X /> Cancelar seleção</> : <><Icons.Check /> Selecionar</>}
+                    </button>
+                    {selectMode && (
+                      <>
+                        <button
+                          onClick={() => setSelectedIds(new Set(filtered.map((p) => p.id)))}
+                          style={{
+                            padding: "6px 14px",
+                            borderRadius: 6,
+                            border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+                            background: "none",
+                            color: dark ? "#9ca3af" : "#6b7280",
+                            fontSize: 12,
+                            fontWeight: 700,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Selecionar todos ({filtered.length})
+                        </button>
+                        {selectedIds.size > 0 && (
+                          <button
+                            onClick={() => removeMultipleProjects([...selectedIds])}
+                            style={{
+                              padding: "6px 14px",
+                              borderRadius: 6,
+                              border: "none",
+                              background: "#dc2626",
+                              color: "#fff",
+                              fontSize: 12,
+                              fontWeight: 700,
+                              cursor: "pointer",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 4,
+                            }}
+                          >
+                            <Icons.Trash /> Remover selecionados ({selectedIds.size})
+                          </button>
+                        )}
+                      </>
+                    )}
+                    {!selectMode && projects.length > 1 && (
+                      <button
+                        onClick={() => {
+                          if (confirm(`Remover todos os ${projects.length} projetos monitorados?`)) {
+                            setProjects([]);
+                            setSelectedIds(new Set());
+                            addToast(`${projects.length} projetos removidos`, "warning");
+                          }
+                        }}
+                        style={{
+                          padding: "6px 14px",
+                          borderRadius: 6,
+                          border: `1px solid ${dark ? "rgba(220,38,38,0.3)" : "rgba(220,38,38,0.2)"}`,
+                          background: "none",
+                          color: "#dc2626",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        <Icons.Trash /> Remover todos
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 {filtered.length === 0 && projects.length === 0 && (
                   <div style={{
@@ -3019,12 +4461,60 @@ export default function App() {
                     <ProjetoCard
                       key={p.id}
                       project={p}
-                      onSelect={(proj) => { setSelectedProject(proj); setView("details"); }}
+                      onSelect={(proj) => { if (selectMode) { toggleSelect(proj.id); } else { setSelectedProject(proj); setView("details"); } }}
                       onRemove={removeProject}
                       lastTramitacao={lastTramitacoes[p.id] || null}
+                      tramitacoes={tramitacoesMap[p.id] || []}
+                      meta={getMeta(projectMeta, p.id)}
+                      unread={isProjectUnread(getMeta(projectMeta, p.id), lastTramitacoes[p.id])}
+                      onMarkVisto={marcarVisto}
+                      onTogglePrioritario={togglePrioritario}
+                      pautaNotas={pautas[p.id] || null}
+                      selectMode={selectMode}
+                      selected={selectedIds.has(p.id)}
+                      onToggleSelect={toggleSelect}
                     />
                   ))}
                 </div>
+                </>)}
+
+                {/* ── Relatorias (formato dedicado) ── */}
+                {dashTab === "relatorias" && (
+                  <div>
+                    <div style={{
+                      padding: "12px 16px", borderRadius: 10, marginBottom: 16,
+                      background: dark ? "rgba(37,99,235,0.08)" : "rgba(37,99,235,0.04)",
+                      border: `1px solid ${dark ? "rgba(37,99,235,0.2)" : "rgba(37,99,235,0.12)"}`,
+                      fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", lineHeight: 1.5,
+                    }}>
+                      Proposições em que o parlamentar de interesse é o <strong>relator</strong> — adicionadas pela busca
+                      "Relator" ou identificadas pela designação nas tramitações
+                      {settings.parlamentarInteresse
+                        ? <span> (parlamentar configurado: <strong>{settings.parlamentarInteresse}</strong>)</span>
+                        : <span>. Configure o parlamentar de interesse em <strong>Configurações</strong> para detecção automática.</span>}
+                    </div>
+                    {relatorias.length === 0 && (
+                      <p style={{ color: theme.muted, fontSize: 13, textAlign: "center", padding: 40 }}>
+                        Nenhuma relatoria identificada. Adicione proposições pela busca por deputado (aba "Relator")
+                        ou configure o parlamentar de interesse em Configurações.
+                      </p>
+                    )}
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 14 }}>
+                      {relatorias.map(({ project, relator, meta }) => (
+                        <RelatoriaCard
+                          key={project.id}
+                          project={project}
+                          relator={relator}
+                          meta={meta}
+                          lastTramitacao={lastTramitacoes[project.id] || null}
+                          tramitacoes={tramitacoesMap[project.id] || []}
+                          pautaNotas={pautas[project.id] || null}
+                          onSelect={(proj) => { setSelectedProject(proj); setView("details"); }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -3033,6 +4523,11 @@ export default function App() {
                 project={selectedProject}
                 onBack={() => { setView("dashboard"); setSelectedProject(null); }}
                 addToast={addToast}
+                meta={getMeta(projectMeta, selectedProject.id)}
+                updateMeta={updateMeta}
+                pautaNotas={pautas[selectedProject.id] || null}
+                unread={isProjectUnread(getMeta(projectMeta, selectedProject.id), lastTramitacoes[selectedProject.id])}
+                onMarkVisto={marcarVisto}
               />
             )}
           </main>
@@ -3042,7 +4537,7 @@ export default function App() {
         {showSearch && (
           <SearchModal
             onClose={() => setShowSearch(false)}
-            onAdd={(item) => { addProject(item); setShowSearch(false); }}
+            onAdd={(item) => { addProject(item); }}
             onAddMultiple={(items) => { addMultipleProjects(items); }}
             monitoredIds={monitoredIds}
             addToast={addToast}
@@ -3099,3 +4594,4 @@ export default function App() {
     </AppContext.Provider>
   );
 }
+

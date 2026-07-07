@@ -11,6 +11,11 @@ Dashboard de monitoramento de proposições legislativas da Câmara dos Deputado
 O LegisTracker permite acompanhar em tempo real a tramitação de projetos de lei na Câmara dos Deputados, oferecendo:
 
 - Atualização automática dos andamentos de cada proposição monitorada
+- Rotina de leitura em três janelas diárias (08h, 14h e 18h) com marcação de "visto" por proposição
+- Detecção de proposições pautadas em eventos legislativos (reuniões de comissão e sessões de Plenário)
+- Identificação do relator designado e contagem do prazo de emendas em comissão (Art. 119, I, RICD)
+- Visão dedicada de relatorias do parlamentar de interesse
+- Marcação de prioridade (com motivação) e de votação (com data), persistidas localmente
 - Análise estratégica com recomendações baseadas no Regimento Interno para acelerar a tramitação
 - Interpretação contextualizada de documentos acessórios (emendas, requerimentos, recursos, destaques)
 - Notificações de mudanças de regime, apreciação e novas tramitações
@@ -19,25 +24,62 @@ O LegisTracker permite acompanhar em tempo real a tramitação de projetos de le
 
 ### Dashboard
 
-- **Painel de resumo** com contadores de projetos em urgência, plenário, comissão e total monitorado
+- **Painel de resumo** com contadores de não vistos na janela de leitura atual, itens em pauta (próximos 7 dias), prioritários, projetos em urgência, plenário, comissão e total monitorado
+- **Abas Monitorados | Relatorias** — visão geral de tudo que é monitorado e formato dedicado para os projetos relatados pelo parlamentar de interesse
 - **Cards de projeto** exibindo para cada proposição:
-  - Último andamento com data/hora
+  - **Título como link** — abre a ficha de tramitação oficial no site da Câmara em nova aba (`fichadetramitacao?idProposicao={id}`)
+  - **Último andamento** (texto do `despacho`/`descricaoTramitacao` da tramitação mais recente) com data/hora e órgão — substitui o antigo campo "Situação"
+  - **Relator designado** (nome, partido, órgão e data de designação, extraídos das tramitações) ou "Relator não designado"
+  - **Prazo de emendas em comissão** — 5 sessões a partir da designação do relator (Art. 119, I, RICD), com estimativa em dias úteis
+  - **Nota de pauta** quando a proposição está pautada em evento legislativo (data/hora, órgão e objeto da apreciação)
+  - Badges de estado: `Não visto`, `Prioritário`, `Votado dd/mm/aaaa`, `Em pauta hoje/amanhã/dd-mm`
+  - Motivo da priorização (quando informado)
   - Regime de tramitação (Urgência, Prioridade, Ordinário) e tipo de apreciação (Plenário, Comissão, Poder Conclusivo)
   - Rito processual que o projeto seguirá
   - Recomendação estratégica principal para acelerar a tramitação, com base legal no RICD
-- **Filtros e ordenação** por tipo, ano, regime, apreciação e andamento mais recente
+- **Filtros e ordenação** por tipo, ano da proposição, ano da votação, regime, apreciação, comissão, área temática, status de leitura (vistas/não vistas), prioridade e votação; ordenação por andamento mais recente, prioritários primeiro, urgência, tipo/número ou ano
 - **Modo escuro/claro**
+
+### Rotina de Leitura (08h • 14h • 18h)
+
+Rotina de leitura em três janelas diárias, pensada para varreduras de manhã, início e fim da tarde:
+
+- Cada proposição pode ser **marcada como "vista"** individualmente (botão no card ou nos detalhes) ou em lote ("Marcar todos como vistos")
+- Itens **ainda não vistos** ganham destaque visual (borda e badge âmbar) e são contados no painel de resumo ("Não vistos — janela atual")
+- **Regra de reset**: o "visto" vale para o conteúdo lido — se surgir **novo andamento** após a marcação, o item volta automaticamente a "não visto" na janela seguinte (ou na atual, ao atualizar)
+- O timestamp do último "visto" e a tramitação lida são persistidos em localStorage por proposição
+
+### Notas de Pauta (eventos legislativos)
+
+- Consulta `GET /eventos` (hoje até +7 dias) e `GET /eventos/{id}/pauta` para descobrir quando uma proposição monitorada está **pautada em reunião de comissão ou sessão de Plenário**
+- Cards e detalhes exibem a **nota de pauta**: data/hora do evento, órgão, tipo de evento e o objeto/fase da apreciação prevista (com regime e relator do item, quando informados)
+- Badge de destaque: `Em pauta hoje`, `Em pauta amanhã` ou `Em pauta dd/mm`
+- A verificação roda ao carregar o app, quando a lista de monitorados muda e a cada atualização manual/polling
+
+### Relatorias
+
+- **Aba "Relatorias"** com layout dedicado para proposições em que o parlamentar de interesse é o **relator**
+- Um projeto entra na visão de relatorias quando: (a) foi adicionado pela busca por deputado na aba "Relator"; ou (b) o relator extraído das tramitações corresponde ao **parlamentar de interesse** configurado em Configurações
+- Cada card de relatoria mostra: relator, órgão, **data de designação**, **prazo do parecer** (Art. 52 RICD — 10 sessões em regime ordinário, 5 em prioridade/urgência), **prazo de emendas** (Art. 119, I, RICD) e a **situação da relatoria** (aguardando parecer / parecer já apresentado)
+
+### Priorização e Votação
+
+- **Prioritário** — toggle por proposição (estrela no card ou checkbox nos detalhes) acompanhado de **campo de texto livre para a motivação**; prioritários ganham destaque visual, filtro e ordenação próprios
+- **Votado + data** — marcação manual nos detalhes (checkbox + campo de data) e **detecção automática** a partir de tramitações que indiquem votação/aprovação (ex.: "Aprovado o projeto", "Aprovada a redação final", "Transformado em lei"); a detecção nunca sobrescreve uma marcação manual
+- **Filtro por ano** em duas dimensões, claramente separadas: **ano da proposição** (ano de apresentação) e **ano da votação** (ano registrado no campo "votado")
 
 ### Busca e Monitoramento
 
-- **Busca por proposição** — formato `PL 1234/2023`, `PEC 45/2019`, etc. Tipos suportados: PL, PEC, PDL, PLP, MPV, PLV, PRC, PDC, MSC, PLN
-- **Busca por deputado** — pesquisa pelo nome e exibe todas as proposições como autor/coautor ou relator
+- **Busca por proposição** — formato `PL 1234/2023`, `PEC 45/2019`, etc. **Todos os tipos de proposição são aceitos**: PL, PEC, PLP, PDL, PDC, PRC, MPV, PLV, PLN, MSC, REQ, RIC, entre outros (qualquer sigla válida da API)
+- **Busca por deputado** — pesquisa pelo nome e exibe todas as proposições como autor/coautor ou relator; itens adicionados pela aba "Relator" são marcados como relatorias do deputado
 - **Monitorar Todos** — botão para adicionar de uma vez todas as proposições de um deputado ao monitoramento (centenas de projetos)
 - **Carregar Todas as Proposições** — paginação automática para buscar o acervo completo de um deputado
 
 ### Detalhes do Projeto
 
-Ao clicar em um projeto monitorado, quatro abas estão disponíveis:
+O cabeçalho dos detalhes traz o **título com link para a ficha oficial da Câmara**, o **último andamento** (no lugar do antigo campo "Situação"), as **notas de pauta** de eventos legislativos, o bloco de **Relatoria** (relator designado, data de designação e prazo de emendas conforme o Art. 119, I, RICD) e o painel de **Gestão do Monitoramento** (visto, prioritário + motivação, votado + data).
+
+Além disso, quatro abas estão disponíveis:
 
 #### Tramitações
 Timeline completa de todos os andamentos, com:
@@ -51,7 +93,7 @@ Timeline completa de todos os andamentos, com:
 - **Explicação do regime** com artigos do RICD, prazos e impacto
 - **Explicação da apreciação** com quórum e requisitos
 - **Órgão atual** com descrição da competência
-- **Situação** com explicação regimental
+- **Último andamento** com data/hora e explicação regimental
 
 #### Estratégia
 Até 3 recomendações estratégicas para acelerar a tramitação, cada uma com:
@@ -110,6 +152,7 @@ Cada tipo traz:
 - Intervalo de polling configurável (5 a 120 minutos)
 - Ativar/desativar notificações push
 - Ativar/desativar alerta sonoro para urgências
+- **Parlamentar de interesse** — nome usado para identificar relatorias automaticamente
 - Modo demonstração com dados simulados
 
 ## Tecnologias
@@ -117,7 +160,7 @@ Cada tipo traz:
 - **React 18** — carregado via CDN (sem build step)
 - **Babel Standalone** — transpilação JSX no navegador
 - **API Dados Abertos da Câmara v2** — `https://dadosabertos.camara.leg.br/api/v2`
-- **LocalStorage** — persistência de projetos, notificações e configurações
+- **LocalStorage** — persistência de projetos, notificações, configurações e metadados por proposição (visto/timestamp, prioritário + motivação, votado + data, relatoria). A migração é **retrocompatível**: dados salvos por versões anteriores continuam funcionando — campos ausentes recebem valores padrão automaticamente
 
 ## Como Usar
 
@@ -170,11 +213,13 @@ O LegisTracker consome os seguintes endpoints da [API Dados Abertos da Câmara](
 |----------|-----|
 | `GET /proposicoes` | Busca de proposições por tipo, número, ano e autor |
 | `GET /proposicoes/{id}` | Detalhes de uma proposição |
-| `GET /proposicoes/{id}/tramitacoes` | Histórico de tramitações |
+| `GET /proposicoes/{id}/tramitacoes` | Histórico de tramitações — também usado para exibir o **último andamento**, extrair o **relator designado** (tramitação de designação), a **data de designação** (marco do prazo de emendas) e detectar votações |
 | `GET /proposicoes/{id}/autores` | Autores da proposição |
 | `GET /proposicoes/{id}/relacionadas` | Documentos acessórios (emendas, requerimentos, etc.) |
 | `GET /deputados` | Busca de deputados por nome |
 | `GET /deputados/{id}` | Detalhes do deputado |
+| `GET /eventos` | Eventos legislativos (reuniões de comissão e sessões de Plenário) no intervalo de hoje a +7 dias |
+| `GET /eventos/{id}/pauta` | Proposições em pauta de cada evento — base das **notas de pauta** e do badge "Em pauta" |
 
 ## Base Regimental
 
@@ -182,13 +227,14 @@ O motor de análise estratégica referencia os seguintes dispositivos do Regimen
 
 - **Regimes de tramitação** — Art. 151-155 (ordinário, prioridade, urgência, urgência urgentíssima)
 - **Emendas** — Art. 118-125 (tipos, prazos, procedimento)
+- **Prazo de emendas em comissão** — **Art. 119, I** (5 sessões a partir da designação do relator). É a base usada pelo LegisTracker para a contagem do prazo de emendas: a `dataHora` da tramitação de designação do relator é o marco inicial, e o app exibe a data de designação, a base regimental e uma estimativa do fim do prazo em dias úteis. *Observação: o Art. 166 do RICD não se aplica a emendas em comissão — refere-se apenas ao caso específico de discussão encerrada na fase de Plenário, e por isso não é citado nessa contagem*
 - **Pareceres** — Art. 126-131 (elaboração, votação, efeitos)
 - **Poder conclusivo** — Art. 24, II e Art. 58, §2º, I CF (comissões com poder terminativo)
 - **Recursos** — Art. 132, §2º (recurso contra poder conclusivo)
 - **Destaques** — Art. 161 (votação em separado)
 - **Requerimentos** — Art. 114-117 (urgência, audiência, adiamento)
 - **PECs** — Art. 191-202 (comissão especial, admissibilidade, dois turnos)
-- **Prazos** — Art. 52 (relator), Art. 202 (comissão especial)
+- **Prazos** — Art. 52 (parecer do relator: 10 sessões em regime ordinário, 5 em prioridade/urgência — exibido na visão de Relatorias), Art. 202 (comissão especial)
 
 ## Licença
 
