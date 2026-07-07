@@ -7,8 +7,13 @@
   
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  
+
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Chart.js 4 (UMD) para os gráficos de barras/séries do módulo de estatísticas.
+       Se o CDN falhar, o app degrada graciosamente: os gráficos SVG (radar/funil)
+       continuam funcionando e os demais mostram uma mensagem clara. -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 
   <style>
     body, html {
@@ -37,6 +42,7 @@
       THEME: "legis_theme",
       LAST_TRAMITACOES: "legis_last_tram",
       PROJECT_META: "legis_project_meta",
+      STATS_CACHE: "legis_stats_cache",
     };
 
     function loadStorage(key, fallback) {
@@ -365,6 +371,504 @@
       };
       const data = await apiFetch("/proposicoes", params);
       return { dados: data.dados || [], links: data.links || [] };
+    }
+
+    // Busca TODAS as proposições de autoria do deputado seguindo a paginação
+    // da API (100 por página). O total de páginas vem do link rel="last";
+    // sem ele, segue o rel="next" até esgotar. Lotes de 4 páginas em paralelo.
+    // onPage(acumulado, pagina, totalPages|null) permite atualização incremental
+    // da UI; shouldCancel() permite abortar quando o usuário troca de contexto.
+    const MAX_PAGINAS_ACERVO = 50; // teto de segurança: 5.000 proposições
+    async function fetchTodasProposicoesDeputado(deputadoId, role = "autor", onPage = null, shouldCancel = null) {
+      const seen = new Set();
+      const all = [];
+      const push = (items) => (items || []).forEach((it) => {
+        if (it && it.id && !seen.has(it.id)) { seen.add(it.id); all.push(it); }
+      });
+      const { dados, links } = await getProposicoesByDeputado(deputadoId, role, 1);
+      push(dados);
+      const lastLink = (links || []).find((l) => l.rel === "last");
+      let totalPages = 1;
+      if (lastLink) {
+        const m = String(lastLink.href).match(/pagina=(\d+)/);
+        if (m) totalPages = Math.min(parseInt(m[1], 10), MAX_PAGINAS_ACERVO);
+      } else if ((links || []).find((l) => l.rel === "next")) {
+        totalPages = MAX_PAGINAS_ACERVO; // total desconhecido: segue até acabar
+      }
+      if (onPage) onPage([...all], 1, lastLink ? totalPages : null);
+      for (let p = 2; p <= totalPages; p += 4) {
+        if (shouldCancel && shouldCancel()) return all;
+        const nums = [];
+        for (let q = p; q < p + 4 && q <= totalPages; q++) nums.push(q);
+        const pages = await Promise.all(nums.map((q) =>
+          getProposicoesByDeputado(deputadoId, role, q).catch(() => ({ dados: [], links: [] }))
+        ));
+        let vazias = 0;
+        pages.forEach(({ dados: d }) => { if (!d || d.length === 0) vazias++; else push(d); });
+        if (onPage) onPage([...all], nums[nums.length - 1], lastLink ? totalPages : null);
+        if (vazias === nums.length) break; // fim do acervo (fallback sem link "last")
+      }
+      return all;
+    }
+
+    // ─── Endpoints de atividade parlamentar (módulo de estatísticas) ───────
+    // Gerador determinístico para os mocks do modo demonstração.
+    // O seed passa por um finalizador murmur3 antes do LCG — sem isso, seeds
+    // consecutivos (ids sequenciais) produzem primeiras saídas quase idênticas.
+    function seededRandom(seed) {
+      let s = seed >>> 0;
+      s = Math.imul(s ^ (s >>> 16), 2246822507) >>> 0;
+      s = Math.imul(s ^ (s >>> 13), 3266489909) >>> 0;
+      s = (s ^ (s >>> 16)) >>> 0;
+      return () => {
+        s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+        return s / 4294967296;
+      };
+    }
+
+    const MOCK_EMENTAS_SUBSTANTIVAS = [
+      "Altera a Lei nº 8.080/1990 para ampliar o acesso a medicamentos no SUS.",
+      "Dispõe sobre a política nacional de segurança de dados pessoais.",
+      "Institui o programa de incentivo à energia solar em escolas públicas.",
+      "Altera o Código de Trânsito Brasileiro para endurecer penas por embriaguez ao volante.",
+      "Dispõe sobre a regulamentação do trabalho em plataformas digitais.",
+      "Cria o fundo nacional de apoio à primeira infância.",
+      "Estabelece diretrizes para a política nacional de saúde mental.",
+    ];
+    const MOCK_EMENTAS_SIMBOLICAS = [
+      "Denomina 'Rodovia Prefeito João Silva' o trecho da BR-101 entre os km 20 e 45.",
+      "Institui o Dia Nacional do Produtor Rural.",
+      "Concede a Medalha do Mérito Legislativo ao Instituto Beneficente Esperança.",
+      "Denomina 'Viaduto Maria de Souza' o viaduto localizado no km 12 da BR-040.",
+      "Institui a Semana Nacional de Valorização da Pessoa Idosa.",
+    ];
+    const MOCK_EMENTAS_FISCALIZACAO = [
+      "Requer informações ao Ministério da Saúde sobre a execução orçamentária da atenção básica.",
+      "Requer a convocação do Ministro de Estado para prestar esclarecimentos sobre contratos.",
+      "Requer a realização de audiência pública para debater a segurança de barragens.",
+    ];
+
+    function makeMockAcervoDeputado(depId) {
+      const rnd = seededRandom(depId);
+      const acervo = [];
+      let idBase = 3000000 + (depId % 1000) * 500;
+      for (let ano = 2019; ano <= 2025; ano++) {
+        const n = 6 + Math.floor(rnd() * 14); // 6 a 19 proposições/ano
+        for (let i = 0; i < n; i++) {
+          const r = rnd();
+          let siglaTipo, ementa;
+          if (r < 0.42) { siglaTipo = "PL"; ementa = MOCK_EMENTAS_SUBSTANTIVAS[Math.floor(rnd() * MOCK_EMENTAS_SUBSTANTIVAS.length)]; }
+          else if (r < 0.55) { siglaTipo = "PL"; ementa = MOCK_EMENTAS_SIMBOLICAS[Math.floor(rnd() * MOCK_EMENTAS_SIMBOLICAS.length)]; }
+          else if (r < 0.75) { siglaTipo = "REQ"; ementa = MOCK_EMENTAS_FISCALIZACAO[Math.floor(rnd() * MOCK_EMENTAS_FISCALIZACAO.length)]; }
+          else if (r < 0.85) { siglaTipo = "RIC"; ementa = MOCK_EMENTAS_FISCALIZACAO[0]; }
+          else if (r < 0.92) { siglaTipo = "PDL"; ementa = "Susta os efeitos de ato normativo do Poder Executivo."; }
+          else if (r < 0.97) { siglaTipo = "PLP"; ementa = MOCK_EMENTAS_SUBSTANTIVAS[Math.floor(rnd() * MOCK_EMENTAS_SUBSTANTIVAS.length)]; }
+          else { siglaTipo = "PEC"; ementa = "Altera a Constituição Federal para aperfeiçoar o processo legislativo."; }
+          acervo.push({ id: idBase++, siglaTipo, numero: 100 + acervo.length, ano, ementa });
+        }
+      }
+      return acervo.reverse(); // mais recentes primeiro, como a API (ordem DESC)
+    }
+
+    function makeMockAtividade(depId, dataInicio, dataFim) {
+      const rnd = seededRandom(depId * 7 + 3);
+      const eventos = [];
+      const discursos = [];
+      const ini = new Date(dataInicio);
+      const fim = new Date(dataFim);
+      for (let d = new Date(ini); d <= fim; d.setDate(d.getDate() + 7)) {
+        const semana = d.toISOString().slice(0, 10);
+        const nEv = Math.floor(rnd() * 4); // 0-3 eventos/semana
+        for (let i = 0; i < nEv; i++) eventos.push({ dataHoraInicio: `${semana}T10:00` });
+        if (rnd() < 0.45) discursos.push({ dataHoraInicio: `${semana}T15:00` });
+      }
+      return { eventos, discursos };
+    }
+
+    async function getDeputadoOrgaos(id) {
+      if (DEMO_MODE) {
+        const rnd = seededRandom(id);
+        const orgaos = [{ siglaOrgao: "CCJC", nomeOrgao: "Comissão de Constituição e Justiça e de Cidadania", titulo: rnd() < 0.2 ? "Presidente" : "Titular" }];
+        if (rnd() < 0.6) orgaos.push({ siglaOrgao: "CFT", nomeOrgao: "Comissão de Finanças e Tributação", titulo: "Suplente" });
+        return orgaos;
+      }
+      const data = await apiFetch(`/deputados/${id}/orgaos`, { itens: 100 });
+      return data.dados || [];
+    }
+
+    // Eventos e discursos são paginados; percorre até maxPaginas sequencialmente
+    async function fetchPaginado(path, params, maxPaginas = 10) {
+      const all = [];
+      for (let pagina = 1; pagina <= maxPaginas; pagina++) {
+        const data = await apiFetch(path, { ...params, itens: 100, pagina });
+        const dados = data.dados || [];
+        all.push(...dados);
+        if (dados.length < 100 || !(data.links || []).find((l) => l.rel === "next")) break;
+      }
+      return all;
+    }
+
+    async function getDeputadoEventos(id, dataInicio, dataFim) {
+      if (DEMO_MODE) return makeMockAtividade(id, dataInicio, dataFim).eventos;
+      return fetchPaginado(`/deputados/${id}/eventos`, { dataInicio, dataFim });
+    }
+
+    async function getDeputadoDiscursos(id, dataInicio, dataFim) {
+      if (DEMO_MODE) return makeMockAtividade(id, dataInicio, dataFim).discursos;
+      return fetchPaginado(`/deputados/${id}/discursos`, { dataInicio, dataFim, ordenarPor: "dataHoraInicio", ordem: "ASC" });
+    }
+
+    async function getDeputadoFrentes(id) {
+      if (DEMO_MODE) {
+        return Array.from({ length: 5 + (id % 25) }, (_, i) => ({ id: i, titulo: `Frente Parlamentar ${i + 1}` }));
+      }
+      const data = await apiFetch(`/deputados/${id}/frentes`);
+      return data.dados || [];
+    }
+
+    // Estima o total de proposições de um deputado com o mínimo de requisições:
+    // a página 1 revela o total de páginas (link rel="last"); se houver mais de
+    // uma, a última página fornece a contagem exata. Usado no benchmark.
+    async function estimarTotalProposicoes(deputadoId) {
+      const { dados, links } = await getProposicoesByDeputado(deputadoId, "autor", 1);
+      const lastLink = (links || []).find((l) => l.rel === "last");
+      if (!lastLink) return dados.length;
+      const m = String(lastLink.href).match(/pagina=(\d+)/);
+      const lastPage = m ? parseInt(m[1], 10) : 1;
+      if (lastPage <= 1) return dados.length;
+      const { dados: ultimos } = await getProposicoesByDeputado(deputadoId, "autor", lastPage);
+      return (lastPage - 1) * 100 + ultimos.length;
+    }
+
+    async function getBancadaPartido(siglaPartido) {
+      if (DEMO_MODE) return MOCK_DEPUTADOS.map((d) => ({ id: d.id, nome: d.nome }));
+      const data = await apiFetch("/deputados", { siglaPartido, idLegislatura: 57, itens: 100 });
+      return data.dados || [];
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ─── Módulo de Estatísticas de Produção Legislativa ────────────────────
+    // ═══════════════════════════════════════════════════════════════════════
+    // Guardrails metodológicos (cf. Figueiredo & Limongi): contagem bruta de
+    // proposições é artefato, não mérito — o Executivo domina a agenda e boa
+    // parte da produção parlamentar é simbólica/distributivista. Por isso:
+    // (1) tudo é desagregado por TIPO e por NATUREZA (substantiva vs. simbólica);
+    // (2) os indicadores são normalizados pelo TEMPO EFETIVO DE EXERCÍCIO;
+    // (3) o benchmark posiciona o deputado em PERCENTIL contra a bancada
+    //     do partido sempre que computável no navegador;
+    // (4) o peso central é da EFETIVIDADE (funil de tramitação), não do volume.
+
+    const LEGISLATURA_ATUAL_INICIO = "2023-02-01"; // posse da 57ª Legislatura
+
+    // Natureza inferida pela ementa/keywords: homenagens, denominações de vias,
+    // medalhas e datas comemorativas são classificadas como simbólicas.
+    const REGEX_SIMBOLICA = /denomina|homenagem|medalha|t[íi]tulo de|data comemorativa|dia nacional|semana nacional|m[êe]s nacional|viaduto|rodovia .*(deputado|prefeito|doutor|professor)|aeroporto de|pr[êe]mio|honor[íi]fic|comemorativ|efem[ée]ride/i;
+    function isSimbolica(prop) {
+      return REGEX_SIMBOLICA.test(`${prop.ementa || ""} ${prop.keywords || ""}`);
+    }
+
+    // Fiscalização: requerimentos de informação (RIC) e requerimentos com teor
+    // fiscalizatório (informações, convocação de autoridade, audiência pública)
+    const REGEX_FISCALIZACAO = /informaç|convocaç|audi[êe]ncia p[úu]blica|fiscaliza|esclarecimento|prestaç[aã]o de contas|explicaç/i;
+    function isFiscalizacao(prop) {
+      const tipo = (prop.siglaTipo || "").toUpperCase();
+      if (tipo === "RIC") return true;
+      if (tipo === "REQ" || tipo === "RCP") return REGEX_FISCALIZACAO.test(prop.ementa || "");
+      return false;
+    }
+
+    // Peso por tipo (relevância institucional aproximada) para a produção
+    // ponderada; proposições simbólicas têm o peso reduzido a 20%.
+    const PESO_TIPO = { PEC: 5, PLP: 4, PL: 3, MPV: 3, PDL: 2, PDC: 2, PRC: 1.5 };
+    function pesoProposicao(prop) {
+      const base = PESO_TIPO[(prop.siglaTipo || "").toUpperCase()] || 0.5;
+      return isSimbolica(prop) ? base * 0.2 : base;
+    }
+
+    // Funil de tramitação: estágio máximo alcançado pela proposição
+    // 0 apresentada → 1 relator designado → 2 parecer aprovado em comissão →
+    // 3 aprovada na Câmara / remetida ao Senado / transformada em lei
+    function estagioFunil(tramitacoes) {
+      let stage = 0;
+      for (const t of tramitacoes || []) {
+        const s = `${t.despacho || ""} ${t.descricaoTramitacao || ""} ${t.descricaoSituacao || ""}`.toLowerCase();
+        if (/transformad[oa] em (lei|norma)|remessa ao senado|enviad[oa] ao senado|aprovad[oa] (o projeto|a proposta|a redaç[aã]o final)/.test(s)) stage = Math.max(stage, 3);
+        else if (/parecer/.test(s) && /aprovad/.test(s)) stage = Math.max(stage, 2);
+        else if (/designad[oa]/.test(s) && /relator/.test(s)) stage = Math.max(stage, 1);
+      }
+      return stage;
+    }
+
+    function semestreDe(dataStr) {
+      if (!dataStr) return null;
+      const d = new Date(dataStr);
+      if (isNaN(d.getTime())) return null;
+      return `${d.getFullYear()}/${d.getMonth() < 6 ? 1 : 2}º sem`;
+    }
+    function ordenarSemestres(keys) {
+      return [...keys].sort((a, b) => {
+        const pa = a.match(/(\d{4})\/(\d)/) || [0, 0, 0];
+        const pb = b.match(/(\d{4})\/(\d)/) || [0, 0, 0];
+        return (parseInt(pa[1], 10) - parseInt(pb[1], 10)) || (parseInt(pa[2], 10) - parseInt(pb[2], 10));
+      });
+    }
+
+    // Escalas de referência: tetos heurísticos da normalização min-max de cada
+    // indicador (calibrados para a 57ª Legislatura; documentados no README).
+    // Onde o percentil real contra a bancada é computável, ele é exibido junto.
+    const ESCALAS_REFERENCIA = {
+      producaoPonderadaAno: 60,  // pontos ponderados/ano ⇒ 100
+      taxaAproveitamento: 0.25,  // 25% da amostra chegando à aprovação ⇒ 100
+      fiscalizacaoAno: 30,       // requerimentos fiscalizatórios/ano ⇒ 100
+      discursosAno: 80,          // discursos/ano ⇒ 100
+      frentes: 30,               // frentes parlamentares ⇒ 100
+      eventosMes: 12,            // eventos de comissão-plenário/mês ⇒ 100
+    };
+    function minMax100(valor, teto) {
+      if (!isFinite(valor) || valor <= 0) return 0;
+      return Math.round(Math.min(100, (valor / teto) * 100));
+    }
+    function percentilRank(valores, v) {
+      if (!valores || valores.length === 0) return null;
+      const abaixo = valores.filter((x) => x < v).length;
+      const iguais = valores.filter((x) => x === v).length;
+      return Math.round(((abaixo + iguais / 2) / valores.length) * 100);
+    }
+
+    // Consolida os dados brutos em estatísticas prontas para os gráficos
+    function computeStats(raw) {
+      const { deputado, proposicoes, orgaos, eventos, discursos, frentes, amostraInfo, bancadaTotais } = raw;
+      const hoje = new Date();
+
+      // Tempo efetivo de exercício na legislatura atual (não o calendário cheio):
+      // usa a data do último status "Exercício" quando posterior à posse.
+      const ultimoStatus = deputado.ultimoStatus || {};
+      let inicioExercicio = new Date(LEGISLATURA_ATUAL_INICIO);
+      if (ultimoStatus.data) {
+        const d = new Date(ultimoStatus.data);
+        if (!isNaN(d.getTime()) && d > inicioExercicio && (ultimoStatus.situacao || "").toLowerCase().includes("exerc")) {
+          inicioExercicio = d;
+        }
+      }
+      const mesesExercicio = Math.max(1, (hoje - inicioExercicio) / (1000 * 60 * 60 * 24 * 30.44));
+      const anosExercicio = mesesExercicio / 12;
+
+      // Papel institucional (presidente/vice de comissão, liderança) para contexto
+      const papelObj = (orgaos || []).find((o) => /presidente|vice|l[íi]der/i.test(o.titulo || ""));
+      const papel = papelObj ? `${papelObj.titulo} — ${papelObj.siglaOrgao || papelObj.nomeOrgao || ""}` : null;
+
+      const classificadas = (proposicoes || []).map((p) => ({
+        ...p,
+        simbolica: isSimbolica(p),
+        fiscalizacao: isFiscalizacao(p),
+        peso: pesoProposicao(p),
+      }));
+
+      // Agregações por ano (para os gráficos tradicionais)
+      const porAno = {};
+      const porTipoAno = {};
+      const naturezaAno = {};
+      const fiscalizacaoAno = {};
+      classificadas.forEach((p) => {
+        const ano = p.ano || 0;
+        if (!ano) return;
+        porAno[ano] = (porAno[ano] || 0) + 1;
+        const tipo = (p.siglaTipo || "?").toUpperCase();
+        if (!porTipoAno[ano]) porTipoAno[ano] = {};
+        porTipoAno[ano][tipo] = (porTipoAno[ano][tipo] || 0) + 1;
+        if (!naturezaAno[ano]) naturezaAno[ano] = { substantiva: 0, simbolica: 0 };
+        naturezaAno[ano][p.simbolica ? "simbolica" : "substantiva"]++;
+        if (p.fiscalizacao) fiscalizacaoAno[ano] = (fiscalizacaoAno[ano] || 0) + 1;
+      });
+
+      // Recorte da legislatura atual, normalizado pelo tempo de exercício
+      const daLegislatura = classificadas.filter((p) => (p.ano || 0) >= 2023);
+      const producaoPonderada = daLegislatura.reduce((acc, p) => acc + p.peso, 0);
+      const producaoPonderadaAno = producaoPonderada / anosExercicio;
+      const fiscalizacaoLegis = daLegislatura.filter((p) => p.fiscalizacao).length;
+      const fiscalizacaoPorAno = fiscalizacaoLegis / anosExercicio;
+
+      // Funil e série semestral da amostra analisada
+      const funil = [0, 0, 0, 0];
+      const amostraPorSemestre = {};
+      (amostraInfo || []).forEach((a) => {
+        for (let s = 0; s <= a.estagio; s++) funil[s]++;
+        const sem = semestreDe(a.dataApresentacao);
+        if (sem) amostraPorSemestre[sem] = (amostraPorSemestre[sem] || 0) + 1;
+      });
+      const amostraN = (amostraInfo || []).length;
+      const taxaAproveitamento = amostraN > 0 ? funil[3] / amostraN : 0;
+
+      // Atividade (presença e mobilização)
+      const eventosN = (eventos || []).length;
+      const discursosN = (discursos || []).length;
+      const frentesN = (frentes || []).length;
+      const eventosMes = eventosN / mesesExercicio;
+      const discursosAno = discursosN / anosExercicio;
+      const eventosPorSemestre = {};
+      (eventos || []).forEach((e) => {
+        const s = semestreDe(e.dataHoraInicio || e.dataHoraFim);
+        if (s) eventosPorSemestre[s] = (eventosPorSemestre[s] || 0) + 1;
+      });
+      const discursosPorSemestre = {};
+      (discursos || []).forEach((e) => {
+        const s = semestreDe(e.dataHoraInicio || e.dataHora);
+        if (s) discursosPorSemestre[s] = (discursosPorSemestre[s] || 0) + 1;
+      });
+
+      // Eixos 0–100 (fórmulas documentadas no painel e no README)
+      const eixos = {
+        producao: Math.round(
+          0.6 * minMax100(producaoPonderadaAno, ESCALAS_REFERENCIA.producaoPonderadaAno) +
+          0.4 * minMax100(taxaAproveitamento, ESCALAS_REFERENCIA.taxaAproveitamento)
+        ),
+        fiscalizacao: minMax100(fiscalizacaoPorAno, ESCALAS_REFERENCIA.fiscalizacaoAno),
+        mobilizacao: Math.round(
+          0.5 * minMax100(discursosAno, ESCALAS_REFERENCIA.discursosAno) +
+          0.5 * minMax100(frentesN, ESCALAS_REFERENCIA.frentes)
+        ),
+        presenca: minMax100(eventosMes, ESCALAS_REFERENCIA.eventosMes),
+      };
+
+      // Benchmark: percentil do total de proposições vs. amostra da bancada
+      let benchmark = null;
+      if (bancadaTotais && bancadaTotais.valores.length >= 3) {
+        benchmark = {
+          partido: bancadaTotais.partido,
+          amostra: bancadaTotais.valores.length,
+          percentilProducao: percentilRank(bancadaTotais.valores, bancadaTotais.valorDeputado),
+          totalDeputado: bancadaTotais.valorDeputado,
+        };
+      }
+
+      return {
+        deputado: {
+          id: deputado.id,
+          nome: deputado.ultimoStatus?.nomeEleitoral || deputado.nomeEleitoral || deputado.nome,
+          partido: deputado.ultimoStatus?.siglaPartido || deputado.siglaPartido || "",
+          uf: deputado.ultimoStatus?.siglaUf || deputado.siglaUf || "",
+          urlFoto: deputado.ultimoStatus?.urlFoto || deputado.urlFoto || "",
+        },
+        papel,
+        inicioExercicio: inicioExercicio.toISOString().slice(0, 10),
+        mesesExercicio: Math.round(mesesExercicio),
+        total: classificadas.length,
+        porAno, porTipoAno, naturezaAno, fiscalizacaoAno,
+        legislatura: {
+          total: daLegislatura.length,
+          producaoPonderada: Math.round(producaoPonderada),
+          producaoPonderadaAno: Math.round(producaoPonderadaAno * 10) / 10,
+          fiscalizacao: fiscalizacaoLegis,
+          simbolicas: daLegislatura.filter((p) => p.simbolica).length,
+        },
+        amostra: { n: amostraN, funil, taxaAproveitamento, porSemestre: amostraPorSemestre },
+        atividade: {
+          eventos: eventosN, eventosMes: Math.round(eventosMes * 10) / 10,
+          discursos: discursosN, discursosAno: Math.round(discursosAno),
+          frentes: frentesN, eventosPorSemestre, discursosPorSemestre,
+        },
+        eixos,
+        benchmark,
+        geradoEm: Date.now(),
+      };
+    }
+
+    // Cache por deputado com TTL de 24h — dados de produção legislativa mudam
+    // devagar; o cache evita refazer dezenas de requisições a cada visita.
+    const STATS_CACHE_TTL = 24 * 60 * 60 * 1000;
+    function loadStatsCache(depId) {
+      const cache = loadStorage(STORAGE_KEYS.STATS_CACHE, {});
+      const entry = cache[depId];
+      if (entry && Date.now() - entry.ts < STATS_CACHE_TTL) return entry.stats;
+      return null;
+    }
+    function saveStatsCache(depId, stats) {
+      const cache = loadStorage(STORAGE_KEYS.STATS_CACHE, {});
+      cache[depId] = { ts: Date.now(), stats };
+      // guarda no máximo 5 deputados para não estourar a cota do localStorage
+      const ids = Object.keys(cache).sort((a, b) => cache[b].ts - cache[a].ts).slice(0, 5);
+      const pruned = {};
+      ids.forEach((id) => { pruned[id] = cache[id]; });
+      try { saveStorage(STORAGE_KEYS.STATS_CACHE, pruned); } catch { /* cota excedida: segue sem cache */ }
+    }
+
+    // Orquestra todas as requisições e devolve o objeto de estatísticas.
+    // Cada fonte tem fallback gracioso: se um endpoint falhar (CORS, 4xx),
+    // o eixo correspondente fica zerado/indisponível sem quebrar o app.
+    const AMOSTRA_FUNIL = 25; // proposições substantivas mais recentes analisadas em detalhe
+    async function carregarEstatisticasDeputado(depId, onProgress, force = false) {
+      if (!DEMO_MODE && !force) {
+        const cached = loadStatsCache(depId);
+        if (cached) return { ...cached, deCache: true };
+      }
+      const hoje = new Date().toISOString().slice(0, 10);
+      onProgress && onProgress("Carregando dados do deputado...");
+      const deputado = await getDeputado(depId);
+
+      onProgress && onProgress("Carregando acervo de proposições (todas as páginas)...");
+      const proposicoes = DEMO_MODE
+        ? makeMockAcervoDeputado(depId)
+        : await fetchTodasProposicoesDeputado(depId, "autor", (acc, pagina, total) => {
+            onProgress && onProgress(`Carregando acervo: página ${pagina}${total ? ` de ${total}` : ""} (${acc.length} proposições)...`);
+          });
+
+      onProgress && onProgress("Carregando atividade parlamentar (órgãos, eventos, discursos, frentes)...");
+      const [orgaos, eventos, discursos, frentes] = await Promise.all([
+        getDeputadoOrgaos(depId).catch(() => []),
+        getDeputadoEventos(depId, LEGISLATURA_ATUAL_INICIO, hoje).catch(() => []),
+        getDeputadoDiscursos(depId, LEGISLATURA_ATUAL_INICIO, hoje).catch(() => []),
+        getDeputadoFrentes(depId).catch(() => []),
+      ]);
+
+      // Amostra para o funil: proposições legislativas substantivas mais recentes
+      const legislativas = proposicoes.filter((p) =>
+        ["PL", "PLP", "PEC", "PDL", "PDC", "MPV"].includes((p.siglaTipo || "").toUpperCase()) && !isSimbolica(p));
+      const amostra = legislativas.slice(0, AMOSTRA_FUNIL);
+      onProgress && onProgress(`Analisando a tramitação de ${amostra.length} proposições (funil de efetividade)...`);
+      const amostraInfo = [];
+      const batch = 6;
+      for (let i = 0; i < amostra.length; i += batch) {
+        const infos = await Promise.all(amostra.slice(i, i + batch).map(async (p) => {
+          try {
+            if (DEMO_MODE) {
+              const rnd = seededRandom(p.id);
+              const r = rnd();
+              const estagio = r < 0.45 ? 0 : r < 0.7 ? 1 : r < 0.88 ? 2 : 3;
+              const mes = 1 + Math.floor(rnd() * 12);
+              return { id: p.id, estagio, dataApresentacao: `${p.ano}-${String(mes).padStart(2, "0")}-15` };
+            }
+            const [det, trams] = await Promise.all([getProposicao(p.id), getTramitacoes(p.id)]);
+            return { id: p.id, estagio: estagioFunil(trams), dataApresentacao: det.dataApresentacao || null };
+          } catch { return null; }
+        }));
+        amostraInfo.push(...infos.filter(Boolean));
+      }
+
+      // Benchmark: total de proposições vs. amostra da bancada do partido
+      let bancadaTotais = null;
+      try {
+        const partido = deputado.ultimoStatus?.siglaPartido || deputado.siglaPartido;
+        if (partido) {
+          onProgress && onProgress(`Calculando benchmark vs. bancada do ${partido}...`);
+          const bancada = (await getBancadaPartido(partido)).filter((d) => d.id !== depId).slice(0, 12);
+          let valores;
+          if (DEMO_MODE) {
+            valores = bancada.map((d) => 20 + Math.floor(seededRandom(d.id)() * 120));
+          } else {
+            valores = [];
+            for (let i = 0; i < bancada.length; i += 4) {
+              const vs = await Promise.all(bancada.slice(i, i + 4).map((d) =>
+                estimarTotalProposicoes(d.id).catch(() => null)));
+              valores.push(...vs.filter((v) => v !== null));
+            }
+          }
+          bancadaTotais = { partido, valores, valorDeputado: proposicoes.length };
+        }
+      } catch { /* benchmark é opcional: segue sem ele */ }
+
+      const stats = computeStats({ deputado, proposicoes, orgaos, eventos, discursos, frentes, amostraInfo, bancadaTotais });
+      if (!DEMO_MODE) saveStatsCache(depId, stats);
+      return stats;
     }
     
     async function getDeputado(id) {
@@ -1907,7 +2411,6 @@
       // ── Load proposições by deputado ──
       // Carrega automaticamente TODAS as páginas do acervo do deputado
       // (a API pagina de 100 em 100), sem exigir cliques em "carregar mais".
-      const MAX_PAGINAS_DEPUTADO = 50; // teto de segurança: 5.000 proposições
       const loadDeputadoProposicoes = async (dep, role) => {
         const token = ++loadTokenRef.current;
         setDepProjLoading(true);
@@ -1917,41 +2420,20 @@
         setDetailsCache({});
         setLoadProgress("");
         try {
-          const { dados, links } = await getProposicoesByDeputado(dep.id, role, 1);
+          const all = await fetchTodasProposicoesDeputado(
+            dep.id,
+            role,
+            (acc, pagina, totalPages) => {
+              if (loadTokenRef.current !== token) return;
+              setResults(acc);
+              if (pagina > 1) {
+                setLoadProgress(`Carregando página ${pagina}${totalPages ? ` de ${totalPages}` : ""}... (${acc.length} até agora)`);
+              }
+            },
+            () => loadTokenRef.current !== token
+          );
           if (loadTokenRef.current !== token) return;
-          const seen = new Set();
-          const all = [];
-          const push = (items) => items.forEach((it) => {
-            if (it && it.id && !seen.has(it.id)) { seen.add(it.id); all.push(it); }
-          });
-          push(dados);
           setResults([...all]);
-
-          // Total de páginas a partir do link "last"; fallback: seguir "next"
-          const lastLink = links.find((l) => l.rel === "last");
-          let totalPages = 1;
-          if (lastLink) {
-            const m = String(lastLink.href).match(/pagina=(\d+)/);
-            if (m) totalPages = Math.min(parseInt(m[1], 10), MAX_PAGINAS_DEPUTADO);
-          } else if (links.find((l) => l.rel === "next")) {
-            totalPages = MAX_PAGINAS_DEPUTADO; // desconhecido: segue até acabar
-          }
-
-          for (let p = 2; p <= totalPages; p += 4) {
-            if (loadTokenRef.current !== token) return;
-            const nums = [];
-            for (let q = p; q < p + 4 && q <= totalPages; q++) nums.push(q);
-            setLoadProgress(`Carregando página ${nums[nums.length - 1]}${lastLink ? ` de ${totalPages}` : ""}... (${all.length} até agora)`);
-            const pages = await Promise.all(nums.map((q) =>
-              getProposicoesByDeputado(dep.id, role, q).catch(() => ({ dados: [], links: [] }))
-            ));
-            if (loadTokenRef.current !== token) return;
-            let vazias = 0;
-            pages.forEach(({ dados: d }) => { if (!d || d.length === 0) vazias++; else push(d); });
-            setResults([...all]);
-            if (vazias === nums.length) break; // fim do acervo (fallback sem link "last")
-          }
-
           setLoadProgress("");
           if (all.length === 0) addToast("Nenhuma proposição encontrada para este deputado", "warning");
           fetchDetailsInBackground(all, token);
@@ -3435,6 +3917,584 @@
       );
     }
     
+    // ─── Estatísticas: componentes de visualização ─────────────────────────
+    const PALETA_GRAFICOS = ["#007A37", "#2563eb", "#ea580c", "#7c3aed", "#dc2626", "#d97706", "#0891b2", "#6b7280"];
+
+    // Wrapper do Chart.js 4 (CDN/UMD): cria a instância via useRef/useEffect e
+    // a destrói no cleanup para evitar leaks em re-render. Se o CDN falhar,
+    // degrada para uma mensagem clara (os SVGs continuam funcionando).
+    function ChartCanvas({ config, height, ariaLabel }) {
+      const { dark } = useContext(AppContext);
+      const canvasRef = useRef(null);
+      useEffect(() => {
+        if (!window.Chart || !canvasRef.current || !config) return;
+        const chart = new window.Chart(canvasRef.current.getContext("2d"), config);
+        return () => chart.destroy();
+      }, [config, dark]);
+      if (!window.Chart) {
+        return (
+          <div role="img" aria-label={ariaLabel} style={{ padding: 20, fontSize: 12, textAlign: "center", color: dark ? "#9ca3af" : "#6b7280", border: `1px dashed ${dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.15)"}`, borderRadius: 8 }}>
+            Gráfico indisponível — a biblioteca Chart.js não pôde ser carregada do CDN.
+            Verifique a conexão; o radar e o funil (SVG) continuam funcionando.
+          </div>
+        );
+      }
+      return (
+        <div style={{ position: "relative", height: height || 260 }}>
+          <canvas ref={canvasRef} role="img" aria-label={ariaLabel} />
+        </div>
+      );
+    }
+
+    // Radar (spider) dos 4 eixos normalizados 0–100 — SVG puro, sem dependências
+    function RadarSVG({ eixos }) {
+      const { dark } = useContext(AppContext);
+      const size = 380, cx = size / 2, cy = size / 2, R = 100;
+      const axes = [
+        { key: "producao", label: "Produção" },
+        { key: "fiscalizacao", label: "Fiscalização" },
+        { key: "mobilizacao", label: "Mobilização" },
+        { key: "presenca", label: "Presença" },
+      ];
+      const ang = (i) => (Math.PI / 2) * i - Math.PI / 2;
+      const pt = (i, r) => [cx + r * Math.cos(ang(i)), cy + r * Math.sin(ang(i))];
+      const val = (k) => Math.max(0, Math.min(100, eixos[k] || 0));
+      const poly = axes.map((a, i) => pt(i, (val(a.key) / 100) * R).join(",")).join(" ");
+      const stroke = dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.12)";
+      const labelFill = dark ? "#9ca3af" : "#6b7280";
+      return (
+        <svg
+          viewBox={`0 0 ${size} ${size}`}
+          width="100%"
+          style={{ maxWidth: 360, display: "block", margin: "0 auto" }}
+          role="img"
+          aria-label={`Radar dos quatro eixos em escala de 0 a 100: produção legislativa ${val("producao")}, fiscalização ${val("fiscalizacao")}, mobilização ${val("mobilizacao")}, presença ${val("presenca")}`}
+        >
+          <title>Radar de indicadores dos 4 eixos (0–100)</title>
+          {[25, 50, 75, 100].map((g) => (
+            <polygon
+              key={g}
+              points={axes.map((a, i) => pt(i, (g / 100) * R).join(",")).join(" ")}
+              fill="none" stroke={stroke} strokeWidth="1"
+            />
+          ))}
+          {axes.map((a, i) => {
+            const [x, y] = pt(i, R);
+            return <line key={a.key} x1={cx} y1={cy} x2={x} y2={y} stroke={stroke} strokeWidth="1" />;
+          })}
+          <polygon points={poly} fill="rgba(0,122,55,0.25)" stroke="#007A37" strokeWidth="2.5" />
+          {axes.map((a, i) => {
+            const [px, py] = pt(i, (val(a.key) / 100) * R);
+            return <circle key={a.key} cx={px} cy={py} r="4" fill="#007A37" />;
+          })}
+          {axes.map((a, i) => {
+            const [x, y] = pt(i, R + 34);
+            return (
+              <text key={a.key} x={x} y={y - 4} textAnchor="middle" fontSize="12" fontWeight="700" fill={labelFill}>
+                {a.label}
+                <tspan x={x} dy="15" fontSize="14" fontWeight="800" fill="#007A37">{val(a.key)}</tspan>
+              </text>
+            );
+          })}
+        </svg>
+      );
+    }
+
+    // Funil de tramitação — SVG puro. O gráfico mais honesto para o caso
+    // brasileiro: mostra quanto da produção realmente avança na tramitação.
+    function FunnelSVG({ funil, amostraN }) {
+      const { dark } = useContext(AppContext);
+      const labels = ["Apresentadas", "Relator designado", "Parecer aprovado em comissão", "Aprovada na Câmara / Lei"];
+      const cores = ["#2563eb", "#7c3aed", "#ea580c", "#007A37"];
+      const W = 480, rowH = 46, gap = 8;
+      const H = labels.length * (rowH + gap);
+      const max = Math.max(1, funil[0]);
+      const labelFill = dark ? "#9ca3af" : "#6b7280";
+      return (
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          width="100%"
+          role="img"
+          aria-label={`Funil de tramitação da amostra de ${amostraN} proposições: ${labels.map((lb, i) => `${lb} ${funil[i]}`).join("; ")}`}
+        >
+          <title>Funil de tramitação: apresentada → relator → parecer aprovado → aprovada/lei</title>
+          {labels.map((lb, i) => {
+            const w = Math.max(10, (funil[i] / max) * (W - 16));
+            const x = (W - w) / 2;
+            const y = i * (rowH + gap);
+            const pct = funil[0] > 0 ? Math.round((funil[i] / funil[0]) * 100) : 0;
+            return (
+              <g key={i}>
+                <text x={W / 2} y={y + 12} textAnchor="middle" fontSize="11" fontWeight="600" fill={labelFill}>{lb}</text>
+                <rect x={x} y={y + 17} width={w} height={rowH - 18} rx="6" fill={cores[i]} opacity="0.9" />
+                <text x={W / 2} y={y + 17 + (rowH - 18) / 2 + 4} textAnchor="middle" fontSize="13" fontWeight="800" fill="#fff">
+                  {funil[i]} ({pct}%)
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+      );
+    }
+
+    // Cartão de benchmark: barras 0–100 por eixo + percentil real vs. bancada
+    function BenchmarkCard({ stats }) {
+      const { dark } = useContext(AppContext);
+      const eixosDef = [
+        { key: "producao", label: "Produção legislativa", cor: "#007A37", desc: "produção ponderada/ano + taxa de aproveitamento" },
+        { key: "fiscalizacao", label: "Fiscalização", cor: "#dc2626", desc: "requerimentos de informação, convocação e audiência/ano" },
+        { key: "mobilizacao", label: "Mobilização", cor: "#ea580c", desc: "discursos/ano + frentes parlamentares" },
+        { key: "presenca", label: "Presença", cor: "#2563eb", desc: "eventos de comissão e plenário/mês de exercício" },
+      ];
+      const bm = stats.benchmark;
+      return (
+        <div>
+          {eixosDef.map((e) => {
+            const v = stats.eixos[e.key] || 0;
+            return (
+              <div key={e.key} style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 3 }}>
+                  <span style={{ fontWeight: 700, color: dark ? "#d1d5db" : "#374151" }}>{e.label}</span>
+                  <span style={{ fontWeight: 800, color: e.cor }}>{v}/100</span>
+                </div>
+                <div
+                  role="img"
+                  aria-label={`${e.label}: ${v} de 100`}
+                  style={{ height: 8, borderRadius: 4, background: dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)", overflow: "hidden" }}
+                >
+                  <div style={{ width: `${v}%`, height: "100%", borderRadius: 4, background: e.cor, transition: "width 0.4s" }} />
+                </div>
+                <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af", marginTop: 2 }}>{e.desc}</div>
+              </div>
+            );
+          })}
+          <div style={{
+            marginTop: 14, padding: "10px 12px", borderRadius: 8, fontSize: 12, lineHeight: 1.5,
+            background: dark ? "rgba(37,99,235,0.08)" : "rgba(37,99,235,0.04)",
+            border: `1px solid ${dark ? "rgba(37,99,235,0.2)" : "rgba(37,99,235,0.12)"}`,
+            color: dark ? "#d1d5db" : "#374151",
+          }}>
+            {bm && bm.percentilProducao !== null ? (
+              <span>
+                <strong>Benchmark vs. bancada:</strong> com {bm.totalDeputado} proposições, o deputado está no
+                {" "}<strong style={{ color: "#2563eb" }}>percentil {bm.percentilProducao}</strong> em volume de produção
+                dentro de uma amostra de {bm.amostra} colegas do {bm.partido}. Lembre: volume bruto não é mérito —
+                compare com a taxa de aproveitamento do funil.
+              </span>
+            ) : (
+              <span>
+                <strong>Benchmark vs. bancada indisponível</strong> — não foi possível amostrar a bancada do partido
+                (limite de requisições ou falha da API). Os eixos acima usam normalização min-max com escalas de
+                referência da 57ª Legislatura, documentadas no README.
+              </span>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Estatísticas: view principal (aba do dashboard) ───────────────────
+    function EstatisticasView({ addToast }) {
+      const { dark } = useContext(AppContext);
+      const [query, setQuery] = useState("");
+      const [deputados, setDeputados] = useState([]);
+      const [buscando, setBuscando] = useState(false);
+      const [selecionado, setSelecionado] = useState(null);
+      const [stats, setStats] = useState(null);
+      const [carregando, setCarregando] = useState(false);
+      const [progresso, setProgresso] = useState("");
+      const [erro, setErro] = useState(null);
+      const [subTab, setSubTab] = useState("graficos"); // graficos | indicadores
+      const [periodo, setPeriodo] = useState("legislatura");
+      const tokenRef = useRef(0);
+
+      const boxStyle = {
+        padding: "16px 18px", borderRadius: 12, marginBottom: 16,
+        background: dark ? "rgba(255,255,255,0.03)" : "#fff",
+        border: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+      };
+      const boxTitle = (titulo, subtitulo) => (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: dark ? "#e5e7eb" : "#111827", fontFamily: "'Source Serif 4', Georgia, serif" }}>{titulo}</div>
+          {subtitulo && <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", marginTop: 2, lineHeight: 1.5 }}>{subtitulo}</div>}
+        </div>
+      );
+
+      const buscar = async () => {
+        if (query.trim().length < 2) { addToast("Digite pelo menos 2 caracteres", "warning"); return; }
+        setBuscando(true);
+        setDeputados([]);
+        try {
+          const data = await searchDeputados(query.trim());
+          setDeputados(data);
+          if (data.length === 0) addToast("Nenhum deputado encontrado", "warning");
+        } catch (err) {
+          addToast("Erro ao buscar deputado: " + err.message, "error");
+        }
+        setBuscando(false);
+      };
+
+      const carregar = async (dep, force = false) => {
+        const token = ++tokenRef.current;
+        setSelecionado(dep);
+        setDeputados([]);
+        setStats(null);
+        setErro(null);
+        setCarregando(true);
+        setProgresso("");
+        try {
+          const s = await carregarEstatisticasDeputado(dep.id, (msg) => {
+            if (tokenRef.current === token) setProgresso(msg);
+          }, force);
+          if (tokenRef.current === token) setStats(s);
+        } catch (err) {
+          if (tokenRef.current === token) setErro(err.message || String(err));
+        }
+        if (tokenRef.current === token) { setCarregando(false); setProgresso(""); }
+      };
+
+      // ── Configurações dos gráficos (Chart.js) ──
+      const gridColor = dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)";
+      const tickColor = dark ? "#9ca3af" : "#6b7280";
+      const baseOptions = (stacked) => ({
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: tickColor, boxWidth: 12, font: { size: 11 } } } },
+        scales: {
+          x: { stacked: !!stacked, ticks: { color: tickColor }, grid: { color: gridColor } },
+          y: { stacked: !!stacked, beginAtZero: true, ticks: { precision: 0, color: tickColor }, grid: { color: gridColor } },
+        },
+      });
+
+      const anoAtual = new Date().getFullYear();
+      const anosTodos = stats ? Object.keys(stats.porAno).map(Number).sort((a, b) => a - b) : [];
+      const anoMinimo = periodo === "legislatura" ? 2023 : periodo === "4anos" ? anoAtual - 3 : periodo === "8anos" ? anoAtual - 7 : 0;
+
+      const buildCharts = (anosSel) => {
+        if (!stats || anosSel.length === 0) return null;
+        // Top 6 tipos no recorte + "Outros"
+        const contagemTipos = {};
+        anosSel.forEach((a) => Object.entries(stats.porTipoAno[a] || {}).forEach(([t, n]) => {
+          contagemTipos[t] = (contagemTipos[t] || 0) + n;
+        }));
+        const tiposTop = Object.keys(contagemTipos).sort((a, b) => contagemTipos[b] - contagemTipos[a]).slice(0, 6);
+        const outros = (a) => Object.entries(stats.porTipoAno[a] || {})
+          .filter(([t]) => !tiposTop.includes(t)).reduce((acc, [, n]) => acc + n, 0);
+        return {
+          porAno: {
+            type: "bar",
+            data: { labels: anosSel, datasets: [{ label: "Proposições apresentadas", data: anosSel.map((a) => stats.porAno[a] || 0), backgroundColor: "#007A37", borderRadius: 4 }] },
+            options: { ...baseOptions(false), plugins: { legend: { display: false } } },
+          },
+          porTipo: {
+            type: "bar",
+            data: {
+              labels: anosSel,
+              datasets: [
+                ...tiposTop.map((t, i) => ({ label: t, data: anosSel.map((a) => (stats.porTipoAno[a] || {})[t] || 0), backgroundColor: PALETA_GRAFICOS[i % PALETA_GRAFICOS.length], borderRadius: 2 })),
+                { label: "Outros", data: anosSel.map(outros), backgroundColor: PALETA_GRAFICOS[7], borderRadius: 2 },
+              ],
+            },
+            options: baseOptions(true),
+          },
+          natureza: {
+            type: "bar",
+            data: {
+              labels: anosSel,
+              datasets: [
+                { label: "Substantivas", data: anosSel.map((a) => (stats.naturezaAno[a] || {}).substantiva || 0), backgroundColor: "#007A37", borderRadius: 2 },
+                { label: "Simbólicas/homenagem", data: anosSel.map((a) => (stats.naturezaAno[a] || {}).simbolica || 0), backgroundColor: "#d97706", borderRadius: 2 },
+              ],
+            },
+            options: baseOptions(true),
+          },
+          fiscalizacao: {
+            type: "bar",
+            data: { labels: anosSel, datasets: [{ label: "Requerimentos fiscalizatórios (RIC + REQ de informação/convocação/audiência)", data: anosSel.map((a) => stats.fiscalizacaoAno[a] || 0), backgroundColor: "#dc2626", borderRadius: 4 }] },
+            options: { ...baseOptions(false), plugins: { legend: { display: false } } },
+          },
+        };
+      };
+
+      const chartsTab1 = useMemo(
+        () => buildCharts(anosTodos.filter((a) => a >= anoMinimo)),
+        [stats, periodo, dark] // eslint-disable-line react-hooks/exhaustive-deps
+      );
+      const chartsLegis = useMemo(
+        () => buildCharts(anosTodos.filter((a) => a >= 2023)),
+        [stats, dark] // eslint-disable-line react-hooks/exhaustive-deps
+      );
+
+      const cfgSemestral = useMemo(() => {
+        if (!stats) return null;
+        const keys = ordenarSemestres([...new Set([
+          ...Object.keys(stats.amostra.porSemestre),
+          ...Object.keys(stats.atividade.eventosPorSemestre),
+          ...Object.keys(stats.atividade.discursosPorSemestre),
+        ])]).filter((k) => parseInt(k, 10) >= 2023);
+        if (keys.length === 0) return null;
+        const linha = (label, dados, cor) => ({ label, data: keys.map((k) => dados[k] || 0), borderColor: cor, backgroundColor: cor, tension: 0.3, pointRadius: 3 });
+        return {
+          type: "line",
+          data: {
+            labels: keys,
+            datasets: [
+              linha(`Proposições substantivas (amostra n=${stats.amostra.n})`, stats.amostra.porSemestre, "#007A37"),
+              linha("Eventos de comissão/plenário (presença)", stats.atividade.eventosPorSemestre, "#2563eb"),
+              linha("Discursos", stats.atividade.discursosPorSemestre, "#ea580c"),
+            ],
+          },
+          options: baseOptions(false),
+        };
+      }, [stats, dark]); // eslint-disable-line react-hooks/exhaustive-deps
+
+      const periodoChip = (val, label) => (
+        <button
+          key={val}
+          onClick={() => setPeriodo(val)}
+          style={{
+            padding: "5px 14px", borderRadius: 20, fontSize: 12, cursor: "pointer",
+            border: periodo === val ? "2px solid #007A37" : `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
+            background: periodo === val ? (dark ? "rgba(0,122,55,0.15)" : "rgba(0,122,55,0.08)") : "transparent",
+            color: periodo === val ? "#007A37" : (dark ? "#9ca3af" : "#6b7280"),
+            fontWeight: periodo === val ? 700 : 500,
+          }}
+        >
+          {label}
+        </button>
+      );
+
+      const subTabStyle = (active, cor) => ({
+        padding: "8px 18px", border: "none", background: "none", cursor: "pointer",
+        borderBottom: active ? `3px solid ${cor}` : "3px solid transparent",
+        color: active ? (dark ? "#e5e7eb" : "#111827") : (dark ? "#6b7280" : "#9ca3af"),
+        fontWeight: active ? 800 : 500, fontSize: 13,
+      });
+
+      return (
+        <div>
+          {/* Busca do deputado */}
+          <div style={boxStyle}>
+            {boxTitle("Estatísticas de Produção Legislativa", "Busque um deputado para gerar os indicadores a partir dos dados abertos da Câmara. Os dados ficam em cache local por 24 horas.")}
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && buscar()}
+                placeholder="Nome do deputado(a)..."
+                style={{
+                  flex: 1, padding: "10px 14px", borderRadius: 8, fontSize: 14, outline: "none",
+                  border: `1px solid ${dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.15)"}`,
+                  background: dark ? "rgba(255,255,255,0.06)" : "#f9fafb",
+                  color: dark ? "#e5e7eb" : "#111827",
+                }}
+              />
+              <button
+                onClick={buscar}
+                disabled={buscando}
+                style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: "#007A37", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, opacity: buscando ? 0.7 : 1 }}
+              >
+                <Icons.Search /> Buscar
+              </button>
+            </div>
+            {deputados.length > 0 && (
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+                {deputados.map((dep) => (
+                  <div
+                    key={dep.id}
+                    onClick={() => carregar(dep)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 12, padding: "8px 12px", borderRadius: 8, cursor: "pointer",
+                      border: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
+                      background: dark ? "rgba(255,255,255,0.02)" : "transparent",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = dark ? "rgba(255,255,255,0.06)" : "rgba(0,122,55,0.04)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = dark ? "rgba(255,255,255,0.02)" : "transparent"; }}
+                  >
+                    {dep.urlFoto && <img src={dep.urlFoto} alt="" style={{ width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }} onError={(e) => { e.target.style.display = "none"; }} />}
+                    <div style={{ flex: 1, fontSize: 13, fontWeight: 700, color: dark ? "#e5e7eb" : "#111827" }}>
+                      {dep.nome} <span style={{ fontWeight: 500, color: dark ? "#6b7280" : "#9ca3af" }}>({dep.siglaPartido}-{dep.siglaUf})</span>
+                    </div>
+                    <span style={{ color: "#007A37", fontSize: 11, fontWeight: 700 }}>Gerar estatísticas →</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Loading */}
+          {carregando && (
+            <div style={{ ...boxStyle, textAlign: "center", padding: "36px 20px" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#007A37", marginBottom: 8 }}>
+                Gerando estatísticas de {selecionado?.nome}...
+              </div>
+              <div style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280" }}>{progresso || "Preparando..."}</div>
+              <div style={{ marginTop: 16 }}><Skeleton height={10} width="60%" style={{ margin: "0 auto" }} /></div>
+            </div>
+          )}
+
+          {/* Erro */}
+          {erro && !carregando && (
+            <div style={{ ...boxStyle, borderColor: "rgba(220,38,38,0.4)" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#dc2626", marginBottom: 6 }}>Não foi possível gerar as estatísticas</div>
+              <div style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", marginBottom: 12 }}>
+                {erro} — a API de Dados Abertos pode estar indisponível ou o navegador pode ter bloqueado as requisições (CORS).
+              </div>
+              <button onClick={() => selecionado && carregar(selecionado, true)} style={{ padding: "8px 16px", borderRadius: 6, border: "none", background: "#007A37", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                Tentar novamente
+              </button>
+            </div>
+          )}
+
+          {/* Vazio */}
+          {!stats && !carregando && !erro && (
+            <div style={{ textAlign: "center", padding: "40px 20px", color: dark ? "#6b7280" : "#9ca3af", fontSize: 13 }}>
+              📊 Busque um deputado acima para visualizar a produção legislativa por período e os indicadores de atuação.
+            </div>
+          )}
+
+          {/* Resultado */}
+          {stats && !carregando && (
+            <div style={{ animation: "fadeIn 0.3s ease" }}>
+              {/* Cabeçalho do deputado */}
+              <div style={{ ...boxStyle, display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+                {stats.deputado.urlFoto && (
+                  <img src={stats.deputado.urlFoto} alt={stats.deputado.nome} style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", border: "2px solid #007A37" }} onError={(e) => { e.target.style.display = "none"; }} />
+                )}
+                <div style={{ flex: 1, minWidth: 220 }}>
+                  <div style={{ fontSize: 17, fontWeight: 800, fontFamily: "'Source Serif 4', Georgia, serif", color: dark ? "#e5e7eb" : "#111827" }}>
+                    {stats.deputado.nome} <span style={{ fontWeight: 600, fontSize: 13, color: dark ? "#9ca3af" : "#6b7280" }}>({stats.deputado.partido}-{stats.deputado.uf})</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: dark ? "#6b7280" : "#9ca3af", marginTop: 3, lineHeight: 1.5 }}>
+                    {stats.total} proposições no acervo • {stats.legislatura.total} na 57ª Legislatura •
+                    exercício desde {new Date(stats.inicioExercicio + "T12:00:00").toLocaleDateString("pt-BR")} ({stats.mesesExercicio} meses)
+                    {stats.papel && <span> • <strong style={{ color: "#2563eb" }}>{stats.papel}</strong></span>}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  {stats.deCache && (
+                    <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af", marginBottom: 4 }}>
+                      Dados em cache ({new Date(stats.geradoEm).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })})
+                    </div>
+                  )}
+                  <button
+                    onClick={() => carregar(selecionado || { id: stats.deputado.id, nome: stats.deputado.nome }, true)}
+                    style={{ padding: "6px 14px", borderRadius: 6, border: `1px solid ${dark ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.15)"}`, background: "none", color: "#007A37", fontSize: 11, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}
+                  >
+                    <Icons.Refresh /> Atualizar dados
+                  </button>
+                </div>
+              </div>
+
+              {/* Sub-abas */}
+              <div style={{ display: "flex", borderBottom: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`, marginBottom: 16 }}>
+                <button style={subTabStyle(subTab === "graficos", "#007A37")} onClick={() => setSubTab("graficos")}>
+                  📊 Produção por Período
+                </button>
+                <button style={subTabStyle(subTab === "indicadores", "#2563eb")} onClick={() => setSubTab("indicadores")}>
+                  🎯 Indicadores (4 eixos)
+                </button>
+              </div>
+
+              {/* ── Sub-aba 1: gráficos tradicionais segmentados por período ── */}
+              {subTab === "graficos" && (
+                <div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+                    {periodoChip("legislatura", "57ª Legislatura (2023–)")}
+                    {periodoChip("4anos", "Últimos 4 anos")}
+                    {periodoChip("8anos", "Últimos 8 anos")}
+                    {periodoChip("tudo", "Todo o período")}
+                  </div>
+                  {!chartsTab1 && (
+                    <p style={{ textAlign: "center", color: dark ? "#6b7280" : "#9ca3af", fontSize: 13, padding: 30 }}>
+                      Nenhuma proposição no período selecionado.
+                    </p>
+                  )}
+                  {chartsTab1 && (
+                    <div>
+                      <div style={boxStyle}>
+                        {boxTitle("Proposições apresentadas por ano", "Contagem bruta — leia junto com a desagregação por tipo e natureza abaixo: volume isolado não indica mérito.")}
+                        <ChartCanvas config={chartsTab1.porAno} ariaLabel="Gráfico de barras de proposições apresentadas por ano" />
+                      </div>
+                      <div style={boxStyle}>
+                        {boxTitle("Por tipo de proposição (empilhado)", "PEC/PLP/PL têm peso institucional maior que requerimentos e indicações.")}
+                        <ChartCanvas config={chartsTab1.porTipo} ariaLabel="Gráfico de barras empilhadas de proposições por tipo e ano" />
+                      </div>
+                      <div style={boxStyle}>
+                        {boxTitle("Natureza: substantivas vs. simbólicas", "Classificação automática pela ementa (homenagens, denominações de vias e datas comemorativas contam como simbólicas).")}
+                        <ChartCanvas config={chartsTab1.natureza} ariaLabel="Gráfico de barras empilhadas de proposições substantivas e simbólicas por ano" />
+                      </div>
+                      <div style={boxStyle}>
+                        {boxTitle("Atividade fiscalizatória por ano", "Requerimentos de informação (RIC) e requerimentos de convocação/audiência pública — eixo clássico da função de controle do Legislativo.")}
+                        <ChartCanvas config={chartsTab1.fiscalizacao} ariaLabel="Gráfico de barras de requerimentos fiscalizatórios por ano" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── Sub-aba 2: indicadores dos 4 eixos ── */}
+              {subTab === "indicadores" && (
+                <div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
+                    <div style={boxStyle}>
+                      {boxTitle("Radar dos 4 eixos (0–100)", "Produção, fiscalização, mobilização e presença — normalizados pelo tempo efetivo de exercício. Inspirado no Índice Legisla Brasil.")}
+                      <RadarSVG eixos={stats.eixos} />
+                    </div>
+                    <div style={boxStyle}>
+                      {boxTitle("Cartão de benchmark", "Escore de cada eixo e percentil do deputado contra amostra da bancada do partido (quando computável).")}
+                      <BenchmarkCard stats={stats} />
+                    </div>
+                  </div>
+
+                  <div style={boxStyle}>
+                    {boxTitle(
+                      `Funil de tramitação — efetividade (amostra: ${stats.amostra.n} proposições substantivas mais recentes)`,
+                      `O indicador mais honesto para o caso brasileiro: quantas proposições avançam de fato. Taxa de aproveitamento da amostra: ${Math.round(stats.amostra.taxaAproveitamento * 100)}%.`
+                    )}
+                    <FunnelSVG funil={stats.amostra.funil} amostraN={stats.amostra.n} />
+                  </div>
+
+                  {cfgSemestral && (
+                    <div style={boxStyle}>
+                      {boxTitle("Série temporal por semestre do mandato", "Proposições substantivas da amostra, presença em eventos e discursos — 57ª Legislatura.")}
+                      <ChartCanvas config={cfgSemestral} ariaLabel="Gráfico de linhas com proposições, eventos e discursos por semestre do mandato" height={280} />
+                    </div>
+                  )}
+
+                  {chartsLegis && (
+                    <div style={boxStyle}>
+                      {boxTitle("Tipo e natureza na legislatura atual", "Barras empilhadas por tipo e por natureza (substantiva vs. simbólica), apenas 2023 em diante.")}
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16 }}>
+                        <ChartCanvas config={chartsLegis.porTipo} ariaLabel="Barras empilhadas por tipo na legislatura atual" height={240} />
+                        <ChartCanvas config={chartsLegis.natureza} ariaLabel="Barras empilhadas por natureza na legislatura atual" height={240} />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Nota metodológica */}
+                  <div style={{
+                    ...boxStyle,
+                    background: dark ? "rgba(234,88,12,0.06)" : "rgba(234,88,12,0.03)",
+                    border: `1px solid ${dark ? "rgba(234,88,12,0.2)" : "rgba(234,88,12,0.12)"}`,
+                  }}>
+                    {boxTitle("Nota metodológica — leia antes de comparar", null)}
+                    <ul style={{ fontSize: 12, color: dark ? "#d1d5db" : "#374151", lineHeight: 1.7, margin: 0, paddingLeft: 18 }}>
+                      <li>Contagem bruta de proposições é um <strong>artefato, não mérito</strong> (cf. Figueiredo &amp; Limongi): o Executivo domina a agenda e a maioria das proposições parlamentares é simbólica ou não avança. Por isso o peso central é da <strong>efetividade</strong> (funil).</li>
+                      <li><strong>Produção</strong> = 0,6 × produção ponderada/ano (pesos: PEC 5, PLP 4, PL/MPV 3, PDL/PDC 2, PRC 1,5, demais 0,5; simbólicas ×0,2; teto {ESCALAS_REFERENCIA.producaoPonderadaAno} pts/ano) + 0,4 × taxa de aproveitamento da amostra (teto {Math.round(ESCALAS_REFERENCIA.taxaAproveitamento * 100)}%).</li>
+                      <li><strong>Fiscalização</strong> = requerimentos fiscalizatórios/ano (teto {ESCALAS_REFERENCIA.fiscalizacaoAno}/ano). <strong>Mobilização</strong> = 0,5 × discursos/ano (teto {ESCALAS_REFERENCIA.discursosAno}) + 0,5 × frentes parlamentares (teto {ESCALAS_REFERENCIA.frentes}). <strong>Presença</strong> = eventos/mês de exercício (teto {ESCALAS_REFERENCIA.eventosMes}).</li>
+                      <li>Todos os eixos são normalizados pelo <strong>tempo efetivo de exercício</strong> ({stats.mesesExercicio} meses desde {new Date(stats.inicioExercicio + "T12:00:00").toLocaleDateString("pt-BR")}), não pelo calendário cheio. Papel institucional exibido no cabeçalho para contexto{stats.papel ? ` (${stats.papel})` : ""}.</li>
+                      <li>O funil usa uma <strong>amostra das {stats.amostra.n} proposições substantivas mais recentes</strong> (PL/PLP/PEC/PDL/MPV) — analisar todas exigiria milhares de requisições. Relatorias não entram no eixo de produção: a API não expõe esse dado de forma consultável.</li>
+                      <li>Alinhamento partidário em votações (orientação vs. voto) não está incluído — exigiria varrer todas as votações da legislatura; pode ser adicionado futuramente via <code>/votacoes</code>.</li>
+                    </ul>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // ─── Relatoria Card (layout dedicado da visão "Relatorias") ────────────
     function RelatoriaCard({ project, relator, meta, lastTramitacao, tramitacoes, onSelect, pautaNotas }) {
       const { dark } = useContext(AppContext);
@@ -4280,15 +5340,33 @@
                       >
                         Relatorias ({relatorias.length})
                       </button>
+                      <button
+                        onClick={() => setDashTab("estatisticas")}
+                        style={{
+                          padding: "8px 18px", border: "none", background: "none", cursor: "pointer",
+                          borderBottom: dashTab === "estatisticas" ? "3px solid #7c3aed" : "3px solid transparent",
+                          color: dashTab === "estatisticas" ? theme.text : theme.muted,
+                          fontWeight: dashTab === "estatisticas" ? 800 : 500, fontSize: 13,
+                        }}
+                      >
+                        Estatísticas
+                      </button>
                     </div>
 
-                    <SummaryPanel
-                      projects={projects}
-                      pendentesLeitura={pendentesLeitura}
-                      janelaLabel={currentWindow.label}
-                      emPauta={Object.keys(pautas).length}
-                      prioritarios={totalPrioritarios}
-                    />
+                    {dashTab !== "estatisticas" && (
+                      <SummaryPanel
+                        projects={projects}
+                        pendentesLeitura={pendentesLeitura}
+                        janelaLabel={currentWindow.label}
+                        emPauta={Object.keys(pautas).length}
+                        prioritarios={totalPrioritarios}
+                      />
+                    )}
+
+                    {/* ── Estatísticas de produção legislativa ── */}
+                    {dashTab === "estatisticas" && (
+                      <EstatisticasView addToast={addToast} />
+                    )}
 
                     {dashTab === "todos" && (<>
                     {/* Rotina de leitura: janela atual + pendentes */}
