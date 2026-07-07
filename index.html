@@ -310,17 +310,69 @@
     
     // ─── API Service ───────────────────────────────────────────────────────
     const BASE = "https://dadosabertos.camara.leg.br/api/v2";
-    
+
+    // Fila global de requisições à API. A API de Dados Abertos aplica rate
+    // limit; quando bloqueia, a resposta chega SEM cabeçalhos CORS e o
+    // navegador converte em "TypeError: Failed to fetch". Rajadas de
+    // Promise.all (estatísticas, pautas, enriquecimento de detalhes) somadas
+    // estouravam esse limite. A fila impõe um teto de concorrência e um
+    // espaçamento mínimo entre inícios; cada requisição ainda tem retry com
+    // backoff para 429/5xx/falha de rede.
+    const API_MAX_CONCORRENTES = 4;
+    const API_ESPACAMENTO_MS = 120; // ~8 requisições/segundo no máximo
+    let apiAtivas = 0;
+    let apiProximoInicio = 0;
+    const apiFila = [];
+    function apiAgendar() {
+      if (apiAtivas >= API_MAX_CONCORRENTES || apiFila.length === 0) return;
+      const tarefa = apiFila.shift();
+      const agora = Date.now();
+      const inicio = Math.max(agora, apiProximoInicio);
+      apiProximoInicio = inicio + API_ESPACAMENTO_MS;
+      apiAtivas++;
+      setTimeout(() => {
+        tarefa().finally(() => {
+          apiAtivas--;
+          apiAgendar();
+        });
+      }, inicio - agora);
+    }
+    function apiEnfileirar(fn) {
+      return new Promise((resolve, reject) => {
+        apiFila.push(() => fn().then(resolve, reject));
+        apiAgendar();
+      });
+    }
+
     async function apiFetch(path, params = {}) {
       const url = new URL(`${BASE}${path}`);
       Object.entries(params).forEach(([k, v]) => {
         if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
       });
-      const res = await fetch(url.toString(), {
-        headers: { Accept: "application/json" },
+      return apiEnfileirar(async () => {
+        let ultimoErro = null;
+        for (let tentativa = 0; tentativa < 3; tentativa++) {
+          if (tentativa > 0) {
+            // backoff: 1s, depois 3s — segura o slot da fila, o que também
+            // reduz o ritmo global enquanto a API estiver limitando
+            await new Promise((r) => setTimeout(r, 1000 * Math.pow(3, tentativa - 1)));
+          }
+          let res;
+          try {
+            res = await fetch(url.toString(), { headers: { Accept: "application/json" } });
+          } catch {
+            ultimoErro = new Error("Falha de rede/CORS ao consultar a API — possível limite de requisições atingido");
+            continue;
+          }
+          if (res.status === 429 || res.status >= 500) {
+            ultimoErro = new Error(`API error ${res.status}`);
+            continue;
+          }
+          if (!res.ok) throw new Error(`API error ${res.status}`); // 4xx: não adianta repetir
+          return res.json();
+        }
+        throw ultimoErro;
       });
-      if (!res.ok) throw new Error(`API error ${res.status}`);
-      return res.json();
     }
     
     async function searchProposicoes(sigla, numero, ano) {
@@ -4336,8 +4388,11 @@
           {erro && !carregando && (
             <div style={{ ...boxStyle, borderColor: "rgba(220,38,38,0.4)" }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "#dc2626", marginBottom: 6 }}>Não foi possível gerar as estatísticas</div>
-              <div style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", marginBottom: 12 }}>
-                {erro} — a API de Dados Abertos pode estar indisponível ou o navegador pode ter bloqueado as requisições (CORS).
+              <div style={{ fontSize: 12, color: dark ? "#9ca3af" : "#6b7280", marginBottom: 12, lineHeight: 1.6 }}>
+                {erro}. O motivo mais comum é o <strong>limite de requisições</strong> da API de Dados Abertos
+                (o painel consulta dezenas de endpoints). As requisições agora são espaçadas e repetidas
+                automaticamente, mas se o limite persistir, <strong>aguarde cerca de 1 minuto</strong> antes de tentar
+                novamente. A API também pode estar temporariamente indisponível.
               </div>
               <button onClick={() => selecionado && carregar(selecionado, true)} style={{ padding: "8px 16px", borderRadius: 6, border: "none", background: "#007A37", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
                 Tentar novamente
