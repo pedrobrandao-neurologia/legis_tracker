@@ -357,11 +357,12 @@
         const dados = propIds.map((id) => MOCK_PROPOSICOES_DB.find((p) => p.id === id)).filter(Boolean);
         return { dados, links: [] };
       }
+      // A API limita "itens" a 100 por página — valores maiores retornam erro 400
+      // e derrubavam toda a listagem de proposições do deputado.
       const params = {
-        ordem: "DESC", ordenarPor: "id", itens: 500, pagina,
+        ordem: "DESC", ordenarPor: "id", itens: 100, pagina,
+        idDeputadoAutor: deputadoId,
       };
-      if (role === "autor") params.idDeputadoAutor = deputadoId;
-      else params.idDeputadoAutor = deputadoId;
       const data = await apiFetch("/proposicoes", params);
       return { dados: data.dados || [], links: data.links || [] };
     }
@@ -1816,21 +1817,21 @@
       const [deputadoRole, setDeputadoRole] = useState("autor");
       const [depLoading, setDepLoading] = useState(false);
       const [depProjLoading, setDepProjLoading] = useState(false);
-      const [depPage, setDepPage] = useState(1);
-      const [hasMore, setHasMore] = useState(false);
-      const [loadingAll, setLoadingAll] = useState(false);
-    
+      const [loadProgress, setLoadProgress] = useState("");
+      // Bumped whenever the deputy/role/mode changes to cancel in-flight page loops
+      const loadTokenRef = useRef(0);
+
       useEffect(() => { inputRef.current?.focus(); }, [mode]);
-    
+
       // Reset on mode change
       useEffect(() => {
+        loadTokenRef.current++;
         setQuery("");
         setResults([]);
         setDeputados([]);
         setSelectedDeputado(null);
         setDetailsCache({});
-        setDepPage(1);
-        setHasMore(false);
+        setLoadProgress("");
       }, [mode]);
     
       const parseQuery = (q) => {
@@ -1889,61 +1890,78 @@
         setDepLoading(false);
       };
     
+      // Enrich results with regime/apreciação details in parallel batches,
+      // without blocking the list or the "Monitorar Todos" action
+      const fetchDetailsInBackground = async (items, token) => {
+        const batch = 8;
+        for (let i = 0; i < items.length; i += batch) {
+          if (loadTokenRef.current !== token) return; // canceled
+          await Promise.all(items.slice(i, i + batch).map((item) =>
+            getProposicao(item.id)
+              .then((det) => setDetailsCache((prev) => ({ ...prev, [item.id]: det })))
+              .catch(() => {})
+          ));
+        }
+      };
+
       // ── Load proposições by deputado ──
-      const loadDeputadoProposicoes = async (dep, role, page = 1) => {
+      // Carrega automaticamente TODAS as páginas do acervo do deputado
+      // (a API pagina de 100 em 100), sem exigir cliques em "carregar mais".
+      const MAX_PAGINAS_DEPUTADO = 50; // teto de segurança: 5.000 proposições
+      const loadDeputadoProposicoes = async (dep, role) => {
+        const token = ++loadTokenRef.current;
         setDepProjLoading(true);
         setSelectedDeputado(dep);
         setDeputadoRole(role);
-        setDepPage(page);
-        if (page === 1) {
-          setResults([]);
-          setDetailsCache({});
-        }
+        setResults([]);
+        setDetailsCache({});
+        setLoadProgress("");
         try {
-          const { dados, links } = await getProposicoesByDeputado(dep.id, role, page);
-          const nextLink = links.find((l) => l.rel === "next");
-          setHasMore(!!nextLink);
-          setResults((prev) => page === 1 ? dados : [...prev, ...dados]);
-          if (dados.length === 0 && page === 1) addToast("Nenhuma proposição encontrada para este deputado", "warning");
-          // Fetch details for regime/apreciação
-          for (const item of dados) {
-            try {
-              const det = await getProposicao(item.id);
-              setDetailsCache((prev) => ({ ...prev, [item.id]: det }));
-            } catch { /* ignore */ }
+          const { dados, links } = await getProposicoesByDeputado(dep.id, role, 1);
+          if (loadTokenRef.current !== token) return;
+          const seen = new Set();
+          const all = [];
+          const push = (items) => items.forEach((it) => {
+            if (it && it.id && !seen.has(it.id)) { seen.add(it.id); all.push(it); }
+          });
+          push(dados);
+          setResults([...all]);
+
+          // Total de páginas a partir do link "last"; fallback: seguir "next"
+          const lastLink = links.find((l) => l.rel === "last");
+          let totalPages = 1;
+          if (lastLink) {
+            const m = String(lastLink.href).match(/pagina=(\d+)/);
+            if (m) totalPages = Math.min(parseInt(m[1], 10), MAX_PAGINAS_DEPUTADO);
+          } else if (links.find((l) => l.rel === "next")) {
+            totalPages = MAX_PAGINAS_DEPUTADO; // desconhecido: segue até acabar
           }
+
+          for (let p = 2; p <= totalPages; p += 4) {
+            if (loadTokenRef.current !== token) return;
+            const nums = [];
+            for (let q = p; q < p + 4 && q <= totalPages; q++) nums.push(q);
+            setLoadProgress(`Carregando página ${nums[nums.length - 1]}${lastLink ? ` de ${totalPages}` : ""}... (${all.length} até agora)`);
+            const pages = await Promise.all(nums.map((q) =>
+              getProposicoesByDeputado(dep.id, role, q).catch(() => ({ dados: [], links: [] }))
+            ));
+            if (loadTokenRef.current !== token) return;
+            let vazias = 0;
+            pages.forEach(({ dados: d }) => { if (!d || d.length === 0) vazias++; else push(d); });
+            setResults([...all]);
+            if (vazias === nums.length) break; // fim do acervo (fallback sem link "last")
+          }
+
+          setLoadProgress("");
+          if (all.length === 0) addToast("Nenhuma proposição encontrada para este deputado", "warning");
+          fetchDetailsInBackground(all, token);
         } catch (err) {
-          addToast("Erro ao carregar proposições: " + err.message, "error");
-        }
-        setDepProjLoading(false);
-      };
-    
-      // Load all pages automatically
-      const loadAllProposicoes = async () => {
-        if (!selectedDeputado || loadingAll) return;
-        setLoadingAll(true);
-        let page = depPage + 1;
-        let moreToLoad = hasMore;
-        while (moreToLoad) {
-          try {
-            const { dados, links } = await getProposicoesByDeputado(selectedDeputado.id, deputadoRole, page);
-            const nextLink = links.find((l) => l.rel === "next");
-            moreToLoad = !!nextLink;
-            setResults((prev) => [...prev, ...dados]);
-            setDepPage(page);
-            setHasMore(moreToLoad);
-            // Fetch details in background (don't await)
-            for (const item of dados) {
-              getProposicao(item.id).then((det) => {
-                setDetailsCache((prev) => ({ ...prev, [item.id]: det }));
-              }).catch(() => {});
-            }
-            page++;
-          } catch {
-            moreToLoad = false;
+          if (loadTokenRef.current === token) {
+            addToast("Erro ao carregar proposições: " + err.message, "error");
+            setLoadProgress("");
           }
         }
-        setLoadingAll(false);
+        if (loadTokenRef.current === token) setDepProjLoading(false);
       };
     
       const handleSearch = () => {
@@ -1980,11 +1998,10 @@
         transition: "all 0.15s",
       });
     
-      // Computed values for sticky bars
+      // Computed values for the sticky bar
       const unmonitored = results.filter((r) => !monitoredIds.has(r.id));
       const allMonitored = results.length > 0 && unmonitored.length === 0;
       const showMonitorBar = mode === "deputado" && selectedDeputado && results.length > 0;
-      const showLoadMoreBar = mode === "deputado" && selectedDeputado && (hasMore || loadingAll) && results.length > 0;
       // Items added from a "Relator" search are tagged for the Relatorias view
       const extraMeta = mode === "deputado" && deputadoRole === "relator" && selectedDeputado
         ? { relatorDe: selectedDeputado.nome }
@@ -2079,8 +2096,7 @@
                   </div>
                   <div style={{ fontSize: 10, color: dark ? "#6b7280" : "#9ca3af" }}>
                     {allMonitored ? "Todas já monitoradas" : `${unmonitored.length} não monitorada(s)`}
-                    {hasMore && !loadingAll && " — mais disponíveis"}
-                    {loadingAll && " — carregando todas..."}
+                    {loadProgress && ` — ${loadProgress}`}
                   </div>
                 </div>
                 <button
@@ -2146,7 +2162,7 @@
                         transition: "background 0.15s",
                         background: dark ? "rgba(255,255,255,0.02)" : "transparent",
                       }}
-                      onClick={() => loadDeputadoProposicoes(dep, "autor", 1)}
+                      onClick={() => loadDeputadoProposicoes(dep, "autor")}
                       onMouseEnter={(e) => { e.currentTarget.style.background = dark ? "rgba(255,255,255,0.06)" : "rgba(0,122,55,0.04)"; }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = dark ? "rgba(255,255,255,0.02)" : "transparent"; }}
                     >
@@ -2206,24 +2222,24 @@
                       </div>
                     </div>
                     <button
-                      onClick={() => { setSelectedDeputado(null); setResults([]); setDetailsCache({}); }}
+                      onClick={() => { loadTokenRef.current++; setSelectedDeputado(null); setResults([]); setDetailsCache({}); setLoadProgress(""); setDepProjLoading(false); }}
                       style={{ background: "none", border: "none", cursor: "pointer", color: dark ? "#9ca3af" : "#6b7280", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}
                     >
                       <Icons.X /> Trocar
                     </button>
                   </div>
-    
+
                   {/* Role filter chips */}
                   <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
                     <button
                       style={roleChipStyle(deputadoRole === "autor")}
-                      onClick={() => loadDeputadoProposicoes(selectedDeputado, "autor", 1)}
+                      onClick={() => loadDeputadoProposicoes(selectedDeputado, "autor")}
                     >
                       Autor / Coautor
                     </button>
                     <button
                       style={roleChipStyle(deputadoRole === "relator")}
-                      onClick={() => loadDeputadoProposicoes(selectedDeputado, "relator", 1)}
+                      onClick={() => loadDeputadoProposicoes(selectedDeputado, "relator")}
                     >
                       Relator
                     </button>
@@ -2303,52 +2319,6 @@
               )}
             </div>
 
-            {/* Sticky bottom bar: Carregar Mais */}
-            {showLoadMoreBar && (
-              <div style={{
-                display: "flex",
-                gap: 10,
-                justifyContent: "center",
-                flexWrap: "wrap",
-                padding: "10px 24px",
-                background: bg,
-                borderTop: `1px solid ${dark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`,
-                flexShrink: 0,
-              }}>
-                <button
-                  onClick={() => loadDeputadoProposicoes(selectedDeputado, deputadoRole, depPage + 1)}
-                  disabled={loadingAll || depProjLoading}
-                  style={{
-                    padding: "8px 24px",
-                    borderRadius: 8,
-                    border: `1px solid ${dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`,
-                    background: "none",
-                    color: (loadingAll || depProjLoading) ? (dark ? "#6b7280" : "#9ca3af") : "#007A37",
-                    fontSize: 12,
-                    fontWeight: 700,
-                    cursor: (loadingAll || depProjLoading) ? "default" : "pointer",
-                  }}
-                >
-                  {depProjLoading ? "Carregando..." : "Carregar mais proposições..."}
-                </button>
-                <button
-                  onClick={loadAllProposicoes}
-                  disabled={loadingAll || depProjLoading}
-                  style={{
-                    padding: "8px 24px",
-                    borderRadius: 8,
-                    border: "none",
-                    background: (loadingAll || depProjLoading) ? (dark ? "rgba(255,255,255,0.06)" : "#e5e7eb") : "#007A37",
-                    color: (loadingAll || depProjLoading) ? (dark ? "#6b7280" : "#9ca3af") : "#fff",
-                    fontSize: 12,
-                    fontWeight: 700,
-                    cursor: (loadingAll || depProjLoading) ? "default" : "pointer",
-                  }}
-                >
-                  {loadingAll ? "Carregando todas..." : "Carregar Todas as Proposições"}
-                </button>
-              </div>
-            )}
           </div>
         </div>
       );
@@ -3773,31 +3743,32 @@
         addToast(`${full.siglaTipo || ""} ${full.numero || ""}/${full.ano || ""} adicionado ao monitoramento`);
       }, [addToast, updateMeta]);
 
-      // Add multiple projects at once
+      // Add multiple projects at once. Items are added IMMEDIATELY with the
+      // data already available — the old version fetched details for every
+      // item sequencialmente antes de adicionar, o que fazia parecer que nada
+      // era adicionado. Detalhes ausentes são completados em segundo plano.
       const addMultipleProjects = useCallback(async (items, extraMeta) => {
-        const toAdd = [];
-        for (const item of items) {
-          let full = item;
-          if (!item.statusProposicao) {
-            try {
-              full = await getProposicao(item.id);
-            } catch {
-              full = item;
-            }
-          }
-          toAdd.push(full);
-        }
         setProjects((prev) => {
           const existingIds = new Set(prev.map((p) => p.id));
-          const newOnes = toAdd.filter((p) => !existingIds.has(p.id));
+          const newOnes = items.filter((p) => !existingIds.has(p.id));
           return [...newOnes, ...prev];
         });
         if (extraMeta) {
           setProjectMeta((prev) => {
             const next = { ...prev };
-            toAdd.forEach((p) => { next[p.id] = { ...(next[p.id] || {}), ...extraMeta }; });
+            items.forEach((p) => { next[p.id] = { ...(next[p.id] || {}), ...extraMeta }; });
             return next;
           });
+        }
+        // Enrich items missing statusProposicao in parallel batches
+        const pending = items.filter((it) => !it.statusProposicao);
+        const batch = 8;
+        for (let i = 0; i < pending.length; i += batch) {
+          await Promise.all(pending.slice(i, i + batch).map((item) =>
+            getProposicao(item.id)
+              .then((full) => setProjects((prev) => prev.map((p) => p.id === item.id ? { ...p, ...full } : p)))
+              .catch(() => {})
+          ));
         }
       }, []);
     
@@ -4564,8 +4535,8 @@
             {showSearch && (
               <SearchModal
                 onClose={() => setShowSearch(false)}
-                onAdd={(item) => { addProject(item); }}
-                onAddMultiple={(items) => { addMultipleProjects(items); }}
+                onAdd={(item, extraMeta) => { addProject(item, extraMeta); }}
+                onAddMultiple={(items, extraMeta) => { addMultipleProjects(items, extraMeta); }}
                 monitoredIds={monitoredIds}
                 addToast={addToast}
               />

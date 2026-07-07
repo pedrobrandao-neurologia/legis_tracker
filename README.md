@@ -72,8 +72,8 @@ Rotina de leitura em três janelas diárias, pensada para varreduras de manhã, 
 
 - **Busca por proposição** — formato `PL 1234/2023`, `PEC 45/2019`, etc. **Todos os tipos de proposição são aceitos**: PL, PEC, PLP, PDL, PDC, PRC, MPV, PLV, PLN, MSC, REQ, RIC, entre outros (qualquer sigla válida da API)
 - **Busca por deputado** — pesquisa pelo nome e exibe todas as proposições como autor/coautor ou relator; itens adicionados pela aba "Relator" são marcados como relatorias do deputado
-- **Monitorar Todos** — botão para adicionar de uma vez todas as proposições de um deputado ao monitoramento (centenas de projetos)
-- **Carregar Todas as Proposições** — paginação automática para buscar o acervo completo de um deputado
+- **Acervo completo carregado automaticamente** — ao selecionar o deputado, o app busca sozinho todas as páginas da API (que pagina de 100 em 100), em lotes paralelos e com indicador de progresso; não é preciso clicar em "carregar mais"
+- **Monitorar Todos** — botão para adicionar de uma vez todas as proposições de um deputado ao monitoramento (centenas de projetos); a adição é imediata e os detalhes de regime/apreciação são completados em segundo plano
 
 ### Detalhes do Projeto
 
